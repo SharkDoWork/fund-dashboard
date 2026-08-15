@@ -1,0 +1,3 @@
+# Windows 批处理文件: 强制 CRLF 行尾(checkout 时), git 内存储 LF
+*.bat text eol=crlf
+*.cmd text eol=crlf

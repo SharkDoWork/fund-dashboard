@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+
+# 引擎产物 / 缓存(可由代码自动重建, 不入库)
+data/latest.json
+data/sync_state.json
+data/baseline_*.json
+data/holdings_*.json
+data/snapshots/
+data/export/
+data/_*.js
+data/_*.json
+data/nav_check_*.md
+
+# 生成产物
+dashboard.html
+data/_dashboard_check.js
+data/fund_history.db
+
+# WorkBuddy 项目本地数据(不入库)
+.workbuddy/
+
+# SQLite 辅助文件(DELETE 日志模式下不产生 -wal/-shm, 保留以防回退到 WAL)
+data/fund_history.db-wal
+data/fund_history.db-shm
+
+# 数据库手工备份(含带时间戳的 fund_history.db.bak_YYYYMMDDHHMMSS, 临时回退用, 不入库)
+*.bak*
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# 日志
+*.log
