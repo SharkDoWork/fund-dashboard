@@ -318,7 +318,7 @@ function posCell(label, value, cls){
 function posHTML(f, key){
   var p = f.position || {};
   if(!p.configured){
-    return '<div class="pos pos-empty">未持仓 (金额为 0) — 添加买入记录后自动计算持仓与收益</div>';
+    return '<div class="pos pos-empty" id="pos_' + key + '">未持仓 (金额为 0) — 添加买入记录后自动计算持仓与收益</div>';
   }
   var srcTag = p.source === "trades"
     ? '<span class="src" style="background:#eef2ff;color:#4338ca;border-radius:4px;padding:0 6px;font-weight:600">按买卖记录计算</span>'
@@ -343,7 +343,7 @@ function posHTML(f, key){
   var srcNote = p.source === "trades"
     ? '<span class="src">由历史买卖记录(移动加权平均成本)按最新净值计算</span>'
     : (p.shares_derived ? '<span class="src">(份额由买入金额/买入净值反推)</span>' : "");
-  return '<div class="pos"><div class="pos-title">个人持仓 ' + srcTag + ' ' + srcNote + '</div><div class="pos-grid">' + cell.join("") + '</div></div>';
+  return '<div class="pos" id="pos_' + key + '"><div class="pos-title">个人持仓 ' + srcTag + ' ' + srcNote + '</div><div class="pos-grid">' + cell.join("") + '</div></div>';
 }
 function penSuffix(f){
   if(!f.holdings_penetrated) return "";
@@ -385,7 +385,7 @@ function cardHTML(f, key){
     directHTML,
     '<div class="navsec"><div class="nav-tabs" id="navtabs_' + key + '">' + navTabs + '</div><div id="navchart_' + key + '" class="navchart"></div></div>',
     '<div id="chart_' + key + '" class="chart"></div>',
-    '<table class="tbl"><thead><tr><th>名称</th><th>代码</th><th>权重(聚合)</th><th>现价</th><th>涨跌幅</th><th>行情时间</th></tr></thead><tbody>' + rows + '</tbody></table>',
+    '<table class="tbl"><thead><tr><th>名称</th><th class="num">代码</th><th class="num">权重(聚合)</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">行情时间</th></tr></thead><tbody>' + rows + '</tbody></table>',
     '<div class="note">注: 价格为实时行情, 当日涨跌幅以"昨收"为锚(即前一日收盘准确数据); 可在顶部选择 20s/60s 自动刷新, 或点"手动刷新"更新, 暂停则不再自动刷新</div>'
   ].join("");
   var starOn = starOf(key);
@@ -846,7 +846,7 @@ function corrHTML(){
   }
   var rows = list.map(function(c){
     var nm = c.code === "516670" ? "畜牧ETF" : (c.code === "003095" ? "中欧医疗" : c.code);
-    return '<tr><td>' + c.date + '</td><td>' + nm + '</td>' +
+    return '<tr><td class="num">' + c.date + '</td><td>' + nm + '</td>' +
       '<td class="num">' + (c.official == null ? "—" : c.official.toFixed(2) + "%") + '</td>' +
       '<td class="num">' + (c.last_model == null ? "—" : c.last_model.toFixed(2) + "%") + '</td>' +
       '<td class="num">' + (c.min_model == null ? "—" : c.min_model.toFixed(2)) + " ~ " + (c.max_model == null ? "—" : c.max_model.toFixed(2)) + '</td>' +
@@ -854,7 +854,7 @@ function corrHTML(){
       '<td class="num" style="color:' + col(c.bias) + ';font-weight:600">' + (c.bias == null ? "—" : c.bias.toFixed(2) + "%") + '</td></tr>';
   }).join("");
   return '<div class="corr-title">历史修正记录(预估 vs 官方实际 · 留作判断)</div>' +
-    '<table class="tbl"><thead><tr><th>交易日</th><th>基金</th><th>官方涨跌幅</th><th>末次模型预估</th><th>当日预估区间</th><th>快照数</th><th>偏差(模型-官方)</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    '<table class="tbl"><thead><tr><th class="num">交易日</th><th>基金</th><th class="num">官方涨跌幅</th><th class="num">末次模型预估</th><th class="num">当日预估区间</th><th class="num">快照数</th><th class="num">偏差(模型-官方)</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 /* ---------------- 持仓管理(需通过本地服务打开) ---------------- */
@@ -863,6 +863,22 @@ function apiPost(url, payload, cb){
     .then(function(r){ return r.json(); })
     .then(function(j){ cb(null, j); })
     .catch(function(e){ cb(e, null); });
+}
+/* 按钮等待效果: 在按钮内嵌入旋转 spinner + 文字并禁用按钮, 完成后 clearBtnBusy 还原。
+   解决"只改按钮文字不够明显、不知何时结束"的问题——旋转动画一眼可知正在处理。 */
+function setBtnBusy(btn, text){
+  if(!btn) return;
+  if(btn._busyOrig === undefined) btn._busyOrig = btn.innerHTML;
+  btn.disabled = true;
+  btn.classList.add("btn-busy");
+  btn.innerHTML = '<span class="btn-spinner"></span>' + (text || "处理中…");
+}
+function clearBtnBusy(btn, origText){
+  if(!btn) return;
+  btn.disabled = false;
+  btn.classList.remove("btn-busy");
+  btn.innerHTML = (origText !== undefined) ? origText : (btn._busyOrig !== undefined ? btn._busyOrig : btn.innerHTML);
+  delete btn._busyOrig;
 }
 function mgrRow(code, name, pos){
   var b = [];
@@ -879,14 +895,14 @@ function mgrHide(code, btn){
   var msg = document.getElementById("mgr-msg");
   if(btn.getAttribute("data-confirm") === "1"){
     /* 第二步: 确认执行(伪删除: 面板隐藏, 数据保留, 可重新添加恢复) */
-    btn.disabled = true; btn.textContent = "删除中...";
+    setBtnBusy(btn, "删除中…");
     var row = btn.closest(".mg-row");
     if(row){ row.classList.add("deleting"); row.style.opacity = "0.45"; }
     apiPost("/api/funds/hide", { code: code }, function(err, j){
       if(err || !j || !j.ok){
         msg.textContent = "删除失败: " + ((j && j.message) || err);
         if(row){ row.classList.remove("deleting"); row.style.opacity = ""; }
-        btn.disabled = false; btn.textContent = "删除"; btn.setAttribute("data-confirm", "0");
+        clearBtnBusy(btn, "删除"); btn.setAttribute("data-confirm", "0");
       } else {
         /* 乐观移除该行(即使引擎刷新慢, 管理面板也立即不再显示) */
         if(row && row.parentNode) row.parentNode.removeChild(row);
@@ -949,11 +965,11 @@ function mgrInit(){
         var code = row.getAttribute("data-code");
         var payload = { code: code };
         row.querySelectorAll(".mg-in").forEach(function(inp){ payload[inp.getAttribute("data-f")] = inp.value; });
-        btn.disabled = true; btn.textContent = "保存中...";
+        setBtnBusy(btn, "保存中…");
         apiPost("/api/funds/save", payload, function(err, j){
           msg.textContent = (err || !j || !j.ok) ? "保存失败: " + ((j && j.message) || err) : "已保存, 正在刷新数据...";
           if(j && j.ok) setTimeout(function(){ location.reload(); }, 1500);
-          else { btn.disabled = false; btn.textContent = "保存"; }
+          else { clearBtnBusy(btn, "保存"); }
         });
       });
     });
@@ -1045,11 +1061,11 @@ function mgrInit(){
         delBox.querySelectorAll(".mg-restore").forEach(function(btn){
           btn.addEventListener("click", function(){
             var code = btn.getAttribute("data-code");
-            btn.disabled = true; btn.textContent = "恢复中...";
+            setBtnBusy(btn, "恢复中…");
             apiPost("/api/funds/unhide", { code: code }, function(err, j){
               if(err || !j || !j.ok){
                 msg.textContent = "恢复失败: " + ((j && j.message) || err);
-                btn.disabled = false; btn.textContent = "恢复";
+                clearBtnBusy(btn, "恢复");
               } else {
                 msg.textContent = "已恢复 " + code + ", 正在重新抓取数据并刷新看板...";
                 setTimeout(function(){ location.reload(); }, 1200);
@@ -1061,11 +1077,11 @@ function mgrInit(){
           btn.addEventListener("click", function(){
             var code = btn.getAttribute("data-code");
             if(btn.getAttribute("data-confirm") === "1"){
-              btn.disabled = true; btn.textContent = "删除中...";
+              setBtnBusy(btn, "删除中…");
               apiPost("/api/funds/purge", { code: code }, function(err, j){
                 if(err || !j || !j.ok){
                   msg.textContent = "彻底删除失败: " + ((j && j.message) || err);
-                  btn.disabled = false; btn.textContent = "彻底删除"; btn.removeAttribute("data-confirm");
+                  clearBtnBusy(btn, "彻底删除"); btn.removeAttribute("data-confirm");
                 } else {
                   msg.textContent = "已彻底删除 " + code + " 的全部数据, 正在刷新...";
                   setTimeout(function(){ location.reload(); }, 1000);
@@ -1088,6 +1104,48 @@ function mgrInit(){
 function trInit(){
   renderTrList();
 }
+/* 添加/删除交易后: 仅局部刷新该基金的交易面板(交易列表+持仓汇总), 不再整页 reload,
+   避免重新下载 1.2MB 页面 + 重初始化所有图表 + 重新触发每日同步遮罩(10~30秒) */
+function refreshTradeFund(code){
+  if(!CFG.funds[code]){ location.reload(); return; }
+  fetch("/api/funds/state?code=" + encodeURIComponent(code)).then(function(r){ return r.json(); }).then(function(j){
+    if(j && j.ok && j.fund){
+      var f = CFG.funds[code];
+      f.trades = j.fund.trades || [];
+      f.position = j.fund.position || {};
+      f.trade_summary = j.fund.trade_summary || {};
+    }
+    renderTrList();            // 重绘交易面板(纯表格, 不涉及图表)
+    refreshCardValues(code);   // 轻量刷新: 只更新该卡片持仓数值, 不重建 navchart_/chart_ 图表
+  }).catch(function(){ location.reload(); });
+}
+/* 轻量刷新: 仅更新某只基金卡片上的"个人持仓"数值(持有/累计收益、当前金额、剩余份额等),
+   不重建 navchart_/chart_ 两个 ECharts 实例。用于交易增删后跟新卡片, 避免整页 reload。
+   CFG.funds[code].position 由调用方(refreshTradeFund)从 /api/funds/state 拉取后已更新。 */
+function refreshCardValues(code){
+  var f = CFG.funds[code];
+  if(!f) return;
+  /* 仅替换 pos 区块 DOM(纯数值展示, 不含任何图表容器), 图表实例保持不动 */
+  var host = document.getElementById("pos_" + code);
+  if(host){
+    var wrap = document.createElement("div");
+    wrap.innerHTML = posHTML(f, code);
+    var node = wrap.firstElementChild;
+    if(node && host.parentNode){ host.parentNode.replaceChild(node, host); }
+  }
+  /* 金额总览: 现有金额/累计收益总计随持仓变化联动(只更新数值, 不重建DOM) */
+  refreshSummary();
+  /* 总览明细行: 同步该基金"现有金额"(children[1])与"累计收益"(children[2])两列(当日预估列由 refreshSummary 负责) */
+  var tr = document.querySelector('tr[data-fkey="' + code + '"]');
+  if(tr){
+    var p = f.position || {};
+    if(tr.children[1]) tr.children[1].textContent = money(p.current_amount);
+    if(tr.children[2]){
+      tr.children[2].textContent = money(p.total_gain) + (p.total_gain_pct == null ? "" : " (" + sv(p.total_gain_pct) + "%)");
+      tr.children[2].style.color = col(p.total_gain);
+    }
+  }
+}
 function renderTrList(){
   var box = document.getElementById("tr-list");
   if(!box) return;
@@ -1103,8 +1161,8 @@ function renderTrList(){
     var gfold = "0";
     try { gfold = localStorage.getItem("trgfold_" + code) || "0"; } catch(e) {}
     var rows = trades.slice().reverse().map(function(t){
-      return '<tr><td>' + t.date + '</td>' +
-        '<td>' + (t.type === "buy" ? '<span style="color:' + UP + ';font-weight:600">买入</span>' : t.type === "sell" ? '<span style="color:' + DOWN + ';font-weight:600">卖出</span>' : '<span style="color:#b45309;font-weight:600">分红</span>') + '</td>' +
+      return '<tr><td>' + (t.type === "buy" ? '<span style="color:' + UP + ';font-weight:600">买入</span>' : t.type === "sell" ? (t.clear ? '<span style="color:#b45309;font-weight:600">清仓</span>' : '<span style="color:' + DOWN + ';font-weight:600">卖出</span>') : '<span style="color:#b45309;font-weight:600">分红</span>') + '</td>' +
+        '<td class="num">' + t.date + '</td>' +
         '<td class="num">' + (t.type === "dividend" ? "—" : Number(t.nav).toFixed(4)) + '</td>' +
         '<td class="num">' + (t.type === "dividend" ? "—" : Number(t.shares).toLocaleString()) + '</td>' +
         '<td class="num" title="成交金额(不含手续费)">' + money(t.amount) + '</td>' +
@@ -1132,7 +1190,7 @@ function renderTrList(){
       Number(sum.sell_shares || 0).toLocaleString() + '份' +
       (sum.dividend_amount ? ' · <b style="color:#b45309">累计分红 ' + money(sum.dividend_amount) + '</b>' : '') + '</div>';
     var listHtml = trades.length
-      ? holdBlock + aggLine + '<table class="tbl"><thead><tr><th>日期</th><th>类型</th><th>净值</th><th>份额</th><th>金额</th><th>手续费</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+      ? holdBlock + aggLine + '<table class="tbl"><thead><tr><th>类型</th><th class="num">日期</th><th class="num">净值</th><th class="num">份额</th><th class="num">金额</th><th class="num">手续费</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
       : holdBlock + aggLine + '<div class="corr-empty" style="margin:4px 0 2px">暂无交易记录 — 在上方添加买入/卖出/分红 (持仓金额将按记录自动计算)</div>';
     return '<div class="tr-group" data-code="' + code + '">' +
       '<div class="tr-group-head">' +
@@ -1149,6 +1207,7 @@ function renderTrList(){
       '<input class="mg-in tr-amount" type="number" step="0.01" placeholder="金额*" style="width:108px">' +
       '<input class="mg-in tr-shares" type="number" step="0.0001" placeholder="份额(自动)" readonly style="width:102px" title="买入填金额自动算份额; 卖出切换为填份额自动算金额">' +
       '<input class="mg-in tr-fee" type="number" step="0.01" placeholder="手续费" style="width:78px" title="按基金申购/赎回费率自动计算, 可手改">' +
+      '<label class="tr-clear-wrap" style="display:none;margin-left:6px;font-size:12px;color:#b45309;white-space:nowrap"><input type="checkbox" class="tr-clear"> 清仓(卖出全部剩余)</label>' +
       '<button class="btn tr-add2">添加</button>' +
       '<span class="tr-div-hint" style="margin-left:8px;color:#6b7280;font-size:12px"></span></div>' +
       '<div class="tr-records" style="display:' + (folded === "1" ? "none" : "") + '">' + listHtml + '</div>' +
@@ -1192,10 +1251,21 @@ function renderTrList(){
       var shares = group.querySelector(".tr-shares").value;
       var date = group.querySelector(".tr-date").value;
       if(!date){ msg.textContent = "请选择" + (type === "dividend" ? "分红" : "成交") + "日期"; return; }
+      var clearChk = group.querySelector(".tr-clear");
+      var isClear = (type === "sell" && clearChk && clearChk.checked);
       var payload;
       if(type === "dividend"){
         if(!amount){ msg.textContent = "请填写分红金额"; return; }
         payload = { code: code, type: type, amount: amount, date: date };
+      } else if(isClear){
+        /* 清仓: 卖出当前全部剩余份额(消除四舍五入碎片残余, 剩余精确归0) */
+        var rem = (CFG.funds[code] && CFG.funds[code].position && CFG.funds[code].position.shares) || 0;
+        rem = Math.max(0, parseFloat(rem) || 0);
+        if(rem <= 0){ msg.textContent = "当前无剩余份额可清仓(已是空仓)"; return; }
+        shares = rem.toFixed(4);
+        amount = (rem * parseFloat(nav)).toFixed(2);
+        var feeC = group.querySelector(".tr-fee").value;
+        payload = { code: code, type: "sell", amount: amount, shares: shares, nav: nav, date: date, fee: feeC, clear: true };
       } else {
         if(!nav){ msg.textContent = "请选择成交日期(自动带净值)或手填净值"; return; }
         if(!amount && !shares){ msg.textContent = "请填写金额或份额(另一个自动计算)"; return; }
@@ -1204,11 +1274,11 @@ function renderTrList(){
         var fee = group.querySelector(".tr-fee").value;
         payload = { code: code, type: type, amount: amount, shares: shares, nav: nav, date: date, fee: fee };
       }
-      btn.disabled = true; btn.textContent = "添加中...";
+      setBtnBusy(btn, "添加中…");
       apiPost("/api/trades/add", payload, function(err, j){
-        msg.textContent = (err || !j || !j.ok) ? "添加失败: " + ((j && j.message) || err) : "已添加交易, 正在刷新数据...";
-        if(j && j.ok) setTimeout(function(){ location.reload(); }, 1200);
-        else { btn.disabled = false; btn.textContent = "添加"; }
+        msg.textContent = (err || !j || !j.ok) ? "添加失败: " + ((j && j.message) || err) : "已添加交易, 正在刷新…";
+        if(j && j.ok) setTimeout(function(){ refreshTradeFund(code); }, 300);
+        else { clearBtnBusy(btn, "添加"); }
       });
     });
   });
@@ -1327,6 +1397,8 @@ function renderTrList(){
       am.setAttribute("readonly", "readonly"); am.style.background = "#f3f4f6"; am.placeholder = "金额(自动)";
       sh.removeAttribute("readonly"); sh.style.background = ""; sh.placeholder = "份额*";
       feeEl.style.display = ""; feeEl.removeAttribute("readonly"); feeEl.style.background = "";
+      var cw = g.querySelector(".tr-clear-wrap"); if(cw) cw.style.display = "";
+      var cchk = g.querySelector(".tr-clear"); if(cchk){ cchk.checked = false; sh.removeAttribute("readonly"); sh.style.background = ""; sh.placeholder = "份额*"; }
     } else {
       sh.setAttribute("readonly", "readonly"); sh.style.background = "#f3f4f6"; sh.placeholder = "份额(自动)";
       am.removeAttribute("readonly"); am.style.background = ""; am.placeholder = "金额*";
@@ -1339,6 +1411,23 @@ function renderTrList(){
     if(sel._b) return; sel._b = true;
     sel.addEventListener("change", function(){
       trSetMode(sel.closest(".tr-group"), sel.value);
+    });
+  });
+  /* 清仓勾选: 自动填入当前剩余份额并禁用份额框(避免手填产生碎片残余) */
+  box.querySelectorAll(".tr-clear").forEach(function(c){
+    if(c._b) return; c._b = true;
+    c.addEventListener("change", function(){
+      var g = c.closest(".tr-group");
+      var sh = g.querySelector(".tr-shares");
+      if(c.checked){
+        var code = g.getAttribute("data-code");
+        var rem = (CFG.funds[code] && CFG.funds[code].position && CFG.funds[code].position.shares) || 0;
+        rem = Math.max(0, parseFloat(rem) || 0);
+        sh.value = rem > 0 ? rem.toFixed(4) : "";
+        sh.setAttribute("readonly", "readonly"); sh.style.background = "#f3f4f6";
+      } else {
+        sh.removeAttribute("readonly"); sh.style.background = ""; sh.value = "";
+      }
     });
   });
   /* 自动只读框聚焦时可手改(移除只读, 手改后自动联动另一框) */
@@ -1359,10 +1448,11 @@ function renderTrList(){
       var msg = document.getElementById("mgr-msg");
       var id = b.getAttribute("data-id");
       if(b.getAttribute("data-confirm") === "1"){
+        setBtnBusy(b, "删除中…");
         apiPost("/api/trades/del", { id: id }, function(err, j){
-          msg.textContent = (err || !j || !j.ok) ? "删除失败: " + ((j && j.message) || err) : "已删除交易记录, 正在刷新...";
-          if(j && j.ok) setTimeout(function(){ location.reload(); }, 1200);
-          else { b.textContent = "删除"; b.removeAttribute("data-confirm"); }
+          msg.textContent = (err || !j || !j.ok) ? "删除失败: " + ((j && j.message) || err) : "已删除交易记录, 正在刷新…";
+          if(j && j.ok){ var _c = b.closest(".tr-group"); _c = _c && _c.getAttribute("data-code"); setTimeout(function(){ refreshTradeFund(_c); }, 300); }
+          else { clearBtnBusy(b, "删除"); b.removeAttribute("data-confirm"); }
         });
       } else {
         b.setAttribute("data-confirm", "1"); b.textContent = "确认删除?";
@@ -1380,15 +1470,15 @@ function mgrAdd(){
   };
   var btn = document.getElementById("mg-add-btn");
   if(!payload.code){ msg.textContent = "请输入基金编码(6位, 如 022982)"; return; }
-  btn.disabled = true; btn.textContent = "添加中...";
+  setBtnBusy(btn, "添加中…");
   apiPost("/api/funds/add", payload, function(err, j){
     if(j && j.ok){
       /* 添加完成后刷新整页(重新生成看板 + 引擎已抓取新基金数据), 确保主看板立即可见新基金 */
       msg.innerHTML = '<span style="color:#16a34a">✓ 已添加 ' + payload.code + (payload.name ? ' (' + payload.name + ')' : '') + '，正在刷新页面…</span>';
-      btn.disabled = false; btn.textContent = "添加基金";
+      clearBtnBusy(btn, "添加基金");
       setTimeout(function(){ location.reload(); }, 900);
     } else {
-      btn.disabled = false; btn.textContent = "添加基金";
+      clearBtnBusy(btn, "添加基金");
       msg.textContent = "添加失败: " + ((j && j.message) || err);
     }
   });
@@ -1545,7 +1635,7 @@ function summaryData(){
 }
 function sumSortTh(key, label){
   var ind = sumSortKey === key ? (sumSortDir > 0 ? " ▲" : " ▼") : "";
-  return '<th class="sortable" data-sort="' + key + '" title="点击排序"> ' + label + ind + '</th>';
+  return '<th class="sortable num" data-sort="' + key + '" title="点击排序"> ' + label + ind + '</th>';
 }
 function summaryHTML(){
   var d = summaryData();
@@ -1799,6 +1889,8 @@ document.getElementById("import-file").addEventListener("change", function(ev){
       ev.target.value = ""; return;
     }
     setStatus("正在导入并重建看板…");
+    var ib = document.getElementById("btn-import");
+    setBtnBusy(ib, "导入中…");
     fetch("/api/import", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -1808,10 +1900,11 @@ document.getElementById("import-file").addEventListener("change", function(ev){
         setStatus("导入成功: " + (j.funds || 0) + " 只基金, " + (j.trades || 0) + " 笔交易 — 即将刷新页面");
         setTimeout(function(){ location.reload(); }, 800);
       } else {
+        clearBtnBusy(ib, "导入数据");
         setStatus("导入失败: " + ((j && j.message) || "未知错误"));
         ev.target.value = "";
       }
-    }).catch(function(){ setStatus("导入失败: 无法连接服务"); ev.target.value = ""; });
+    }).catch(function(){ clearBtnBusy(ib, "导入数据"); setStatus("导入失败: 无法连接服务"); ev.target.value = ""; });
   };
   reader.readAsText(file);
 });
@@ -2018,6 +2111,7 @@ __ECHARTS_INLINE__
   .tbl th { text-align:left; color:#6b7280; font-weight:600; border-bottom:1px solid #e5e7eb; padding:7px 6px; white-space:nowrap; }
   .tbl td { padding:6px; border-bottom:1px solid #f1f3f5; }
   .tbl .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .tbl th.num { text-align:right; }
   .tbl .nm { font-weight:600; }
   .tbl tbody tr:hover { background:#fafbfc; }
   .note { color:#9ca3af; font-size:11.5px; margin-top:8px; }
@@ -2055,6 +2149,9 @@ __ECHARTS_INLINE__
   #sync-overlay.fail .sync-spinner { border-color:#fecaca; border-top-color:#b42318; animation:none; }
   #sync-overlay.fail .sync-title { color:#b42318; }
   #sync-overlay.fail .sync-sub { color:#7f1d1d; }
+  /* ---- 按钮等待效果(添加/删除/保存/恢复/导入等异步操作) ---- */
+  .btn:disabled { opacity:.62; cursor:wait; }
+  .btn-spinner { display:inline-block; width:13px; height:13px; border:2px solid rgba(55,65,81,.25); border-top-color:#4338ca; border-radius:50%; margin-right:6px; vertical-align:-2px; animation:syncspin .7s linear infinite; }
   /* ---- 右侧浮动按钮 ---- */
   .fab { position:fixed; right:18px; bottom:22px; display:flex; flex-direction:column; gap:10px; z-index:9990; }
   .fab-btn { width:52px; height:52px; border-radius:14px; border:1px solid #c7d2fe; background:#fff; color:#4338ca; box-shadow:0 6px 18px rgba(30,41,59,.18); cursor:pointer; font-size:18px; font-weight:700; line-height:1.1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; transition:transform .12s, background .12s; }

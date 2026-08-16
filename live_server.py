@@ -297,6 +297,25 @@ class Handler(BaseHTTPRequestHandler):
             visible = {k: v for k, v in allf.items() if not v.get("hidden")}
             deleted = {k: v for k, v in allf.items() if v.get("hidden")}
             self._json({"ok": True, "funds": visible, "deleted": deleted})
+        elif path.startswith("/api/funds/state"):
+            # 轻量返回单只基金最新快照(交易/持仓/聚合), 供添加/删除交易后局部刷新交易面板, 避免整页 reload
+            # 兼容两种调用: 路径 /api/funds/state/<code> 与查询参数 /api/funds/state?code=<code>
+            # 注意: 上方 path 已被 urlparse(...).path 剥离查询串, 查询参数须从 self.path 的 query 部分取
+            code = path[len("/api/funds/state"):].lstrip("/").split("?")[0].strip()
+            if not code:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                code = (qs.get("code") or [""])[0].strip()
+            if not (code.isdigit() and len(code) == 6):
+                self._json({"ok": False, "message": "基金代码无效"}, 400); return
+            lat = fund_db.kv_get("latest.json") or {}
+            fund = (lat.get("funds") or {}).get(code)
+            if not fund:
+                self._json({"ok": False, "message": "未找到基金快照(可能已隐藏)"}); return
+            self._json({"ok": True, "code": code, "fund": {
+                "trades": fund.get("trades") or [],
+                "position": fund.get("position") or {},
+                "trade_summary": fund.get("trade_summary") or {},
+            }})
         elif path == "/api/settings":
             st = fund_db.kv_get("settings.json") or {}
             if not isinstance(st, dict):
@@ -454,6 +473,8 @@ class Handler(BaseHTTPRequestHandler):
                 v = data.get(key)
                 if v not in (None, ""):
                     args += [flag, str(v)]
+            if data.get("clear"):
+                args += ["--clear"]
             r = subprocess.run(args, capture_output=True, text=True, timeout=30, close_fds=True)
             msg = (r.stdout or r.stderr).strip()
             if r.returncode != 0:

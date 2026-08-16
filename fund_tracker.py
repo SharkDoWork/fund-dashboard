@@ -538,6 +538,11 @@ def compute_position(code, meta, fobj, nav_history):
                 # 现金分红: 纯已实现现金收入, 不影响份额/成本
                 realized += tr["amount"]
                 dividend_total += tr["amount"]
+        # 浮点除尘: 残余份额小于 1e-6 视为精确归零(清理/清仓后浮点舍入残留易触发无意义的持有收益率,
+        # 如 0.0014-1.0 等; 1e-6 份额≈0 价值, 远低于真实持仓, 不影响任何实际持仓计算)
+        if sh < 1e-6:
+            sh = 0.0
+            cost = 0.0
         pos = {"configured": sh > 0 or buy_amt > 0, "source": "trades",
                "buy_amount": round(buy_amt, 2),
                "shares": round(sh, 4), "avg_cost_nav": round(avg, 4),

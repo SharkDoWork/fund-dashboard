@@ -119,7 +119,8 @@ def do_trade_add(args):
           "amount": round(amount, 2),
           "shares": round(shares, 4) if shares is not None else 0,
           "nav": round(nav, 4) if nav is not None else 0,
-          "date": date, "fee": round(fee, 2)}
+          "date": date, "fee": round(fee, 2),
+          "clear": True if getattr(args, "clear", False) else False}
     t = load_trades()
     # 幂等保护: 同一 code+type+amount+date+nav+shares 已存在则跳过, 防止重复提交导致双写
     for ex in t["trades"]:
@@ -135,7 +136,7 @@ def do_trade_add(args):
     if ttype == "dividend":
         print(f"已添加分红记录: {code} {date} 金额{tr['amount']}")
     else:
-        tname = "买入" if ttype == "buy" else "卖出"
+        tname = "买入" if ttype == "buy" else ("清仓" if tr.get("clear") else "卖出")
         print(f"已添加{tname}记录: {code} {date} 净值{tr['nav']} 份额{tr['shares']} 金额{tr['amount']} 手续费{tr['fee']}")
 
 def do_trade_list(args):
@@ -472,6 +473,7 @@ if __name__ == "__main__":
     pt.add_argument("--nav", type=float, help="成交净值(买卖必填, 分红无需)")
     pt.add_argument("--date", help="成交日期 YYYY-MM-DD, 缺省今天")
     pt.add_argument("--fee", type=float, help="手续费(元), 缺省按基金配置费率自动计算")
+    pt.add_argument("--clear", action="store_true", help="清仓: 标记该笔卖出为清空全部剩余份额(用于消除四舍五入碎片残余)")
     ptl = sub.add_parser("trades"); ptl.add_argument("code", nargs="?")
     ptd = sub.add_parser("tradedel"); ptd.add_argument("id")
     args = ap.parse_args()
