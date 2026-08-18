@@ -55,10 +55,14 @@ except Exception:
     TAG_DEFS = {}
 
 # 历史修正记录(最近若干条, 留作"预估vs实际"判断)
+# 仅显示已开启"预估修正"开关的基金(开关默认关闭, 在基金管理面板或 manage_funds 设置)
 try:
-    _, corr_rows = fund_db.query("corrections", limit=20, order="DESC")
+    _fcfg = fund_db.kv_get("funds.json") or {}
+    _fcfg_funds = _fcfg.get("funds", {}) if isinstance(_fcfg, dict) else {}
+    _, corr_rows = fund_db.query("corrections", limit=50, order="DESC")
     CORRECTIONS = [{"date": r[0], "code": r[1], "official": r[3], "last_model": r[4],
-                    "min_model": r[5], "max_model": r[6], "snaps": r[7], "bias": r[8]} for r in corr_rows]
+                    "min_model": r[5], "max_model": r[6], "snaps": r[7], "bias": r[8]} for r in corr_rows
+                   if (_fcfg_funds.get(r[1]) or {}).get("est_correction")]
 except Exception:
     CORRECTIONS = []
 
@@ -887,6 +891,8 @@ function mgrRow(code, name, pos){
   b.push('<span class="mg-name">', name, ' <span class="src">', code, '</span></span>');
   b.push('<input class="mg-in mg-tags" data-f="tags" placeholder="分类(逗号分隔, 如: 养老金专属,指数基金)" value="', (pos.tags || []).join(","), '" style="flex:1;min-width:160px">');
   b.push('<input class="mg-in" data-f="buy_fee_rate" title="申购费率(百分比, 如0.12=0.12%)" placeholder="申购费率%" value="', (pos.buy_fee_rate ? pos.buy_fee_rate * 100 : ""), '" style="width:66px">');
+  b.push('<label class="mg-est-wrap" title="开启后记录该基金每日\'模型预估 vs 官方实际\'修正(默认关闭; 关闭则不生成、不显示)">预估修正'
+         + '<input type="checkbox" class="mg-est" ', (pos.est_correction ? "checked" : ""), '></label>');
   b.push('<button class="btn mg-save">保存</button>');
   b.push('<button class="btn mg-del">删除</button></div>');
   return b.join("");
@@ -970,6 +976,25 @@ function mgrInit(){
           msg.textContent = (err || !j || !j.ok) ? "保存失败: " + ((j && j.message) || err) : "已保存, 正在刷新数据...";
           if(j && j.ok) setTimeout(function(){ location.reload(); }, 1500);
           else { clearBtnBusy(btn, "保存"); }
+        });
+      });
+    });
+    /* 预估修正开关: 即时切换, 不依赖"保存"按钮 */
+    box.querySelectorAll(".mg-est").forEach(function(cb){
+      cb.addEventListener("change", function(){
+        var row = cb.closest(".mg-row");
+        var code = row.getAttribute("data-code");
+        var enabled = cb.checked;
+        cb.disabled = true;
+        apiPost("/api/fund/est-correction", { code: code, state: enabled ? "on" : "off" }, function(err, j){
+          cb.disabled = false;
+          if(err || !j || !j.ok){
+            msg.textContent = "切换预估修正失败: " + ((j && j.message) || err);
+            cb.checked = !enabled;  // 还原 UI
+          } else {
+            msg.textContent = (enabled ? "已开启" : "已关闭") + " " + code + " 的预估修正, 正在刷新...";
+            setTimeout(function(){ location.reload(); }, 1800);
+          }
         });
       });
     });
@@ -2032,6 +2057,9 @@ __ECHARTS_INLINE__
   .btn-star { background:none; border:none; font-size:17px; line-height:1; cursor:pointer; color:#d1d5db; padding:0 2px; }
   .btn-star.on { color:#f59e0b; }
   .mg-in { border:1px solid #d1d5db; border-radius:6px; padding:5px 8px; font-size:12.5px; width:120px; }
+  .mg-est-wrap { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:#6b7280; cursor:pointer; user-select:none; padding:3px 8px; border:1px solid #e5e7eb; border-radius:6px; background:#fafafa; }
+  .mg-est { width:15px; height:15px; accent-color:#4338ca; cursor:pointer; }
+  .mg-est-wrap:hover { border-color:#c7d2fe; }
   .mg-in:focus { outline:2px solid #c7d2fe; border-color:#818cf8; }
   .mgr-add { margin-top:6px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .mgr-sec-title { font-size:12.5px; font-weight:700; color:#4338ca; margin:14px 0 8px; }

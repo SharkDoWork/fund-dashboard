@@ -501,6 +501,29 @@ class Handler(BaseHTTPRequestHandler):
                 _ok, log = _run_script("make_dashboard.py")
                 log = (log_pos + "\n" + log)[-400:]
             self._json({"ok": True, "message": f"已删除交易记录并刷新: {msg}", "engine": log[-400:]})
+        elif path == "/api/fund/est-correction":
+            code = str(data.get("code", "")).strip()
+            state = str(data.get("state", "")).strip().lower()
+            if not (code.isdigit() and len(code) == 6):
+                self._json({"ok": False, "message": "基金代码须为 6 位数字"})
+                return
+            if state not in ("on", "off"):
+                self._json({"ok": False, "message": "state 须为 on 或 off"})
+                return
+            r = subprocess.run([PY, os.path.join(BASE, "manage_funds.py"), "est-correction", code, state],
+                               capture_output=True, text=True, timeout=30, close_fds=True)
+            msg = (r.stdout or r.stderr).strip()
+            if r.returncode != 0:
+                self._json({"ok": False, "message": msg})
+                return
+            # 开启: 需要联网同步才能生成修正 -> 全量引擎刷新; 关闭: 已清库, 仅轻量重建看板即可
+            with SYNC_LOCK:
+                if state == "on":
+                    log = refresh_engine()
+                else:
+                    _ok, log = _run_script("make_dashboard.py")
+            self._json({"ok": True, "message": f"已{('开启' if state == 'on' else '关闭')}预估修正: {msg}",
+                        "engine": log[-400:] if isinstance(log, str) else log})
         elif path == "/api/import":
             """导入数据备份: 覆盖写入 funds/trades/settings 并重建看板(可用于空库初始化/换机迁移)"""
             if not isinstance(data, dict):

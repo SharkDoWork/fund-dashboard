@@ -236,15 +236,18 @@ def _official_nav(trade_date, fund_code):
         c.close()
 
 @_retry
-def generate_corrections():
+def generate_corrections(enabled_codes=None):
     """
     延迟补生成修正记录:
     对每个"有快照的交易日+基金", 若当日官方净值已入库且尚无修正记录 -> 生成。
-    返回本次新生成的记录数。
+    enabled_codes: 仅这些基金参与修正(预估修正开关开启的); 为 None 时全部参与(向后兼容)。
+    返回 (本次新生成记录数, 清理的快照行数)。
     """
     init_db()
     made = 0
     for trade_date, fund_code in _trade_days_with_snapshots():
+        if enabled_codes is not None and fund_code not in enabled_codes:
+            continue  # 预估修正未开启: 跳过(也不显示)
         if _exists_correction(trade_date, fund_code):
             continue
         if not _has_official_nav(trade_date, fund_code):
@@ -269,7 +272,78 @@ def generate_corrections():
             made += 1
         finally:
             c.close()
-    return made
+    # 修正生成后清理快照(已被 corrections 汇总); 删除后回收空间
+    purged = purge_old_snapshots(enabled_codes=enabled_codes)
+    return made, purged
+
+
+@_retry
+def delete_corrections_for_fund(code):
+    """删除某基金的全部修正记录(关闭预估修正时调用)"""
+    init_db()
+    c = _conn()
+    try:
+        n = c.execute("DELETE FROM corrections WHERE fund_code=?", (code,)).rowcount
+        c.commit()
+        return n
+    finally:
+        c.close()
+
+
+@_retry
+def delete_snapshots_for_fund(code):
+    """删除某基金的全部原始快照(关闭预估修正时调用, 该基金不再需要快照)"""
+    init_db()
+    c = _conn()
+    try:
+        n = c.execute("DELETE FROM snapshots WHERE fund_code=?", (code,)).rowcount
+        c.commit()
+        return n
+    finally:
+        c.close()
+
+
+def purge_old_snapshots(enabled_codes=None, days=7):
+    """
+    清理 snapshots 表, 防止一天多次快照无限膨胀:
+      - 规则1: 已生成修正记录(被汇总)的 (交易日,基金) 快照全部删除(无论是否今日)
+      - 规则2: 超过 days 天的快照一律删除(兜底, 处理 hidden/未开启修正基金的堆积)
+    仅在发生过删除时执行 VACUUM 回收 SQLite 文件空间。
+    返回删除的快照行数。
+    """
+    init_db()
+    cutoff = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    deleted = 0
+    c = _conn()
+    try:
+        # 规则1: 有修正记录的 (交易日,基金) -> 快照已冗余
+        cur = c.execute("SELECT DISTINCT trade_date, fund_code FROM corrections")
+        for td, fc in cur.fetchall():
+            if enabled_codes is not None and fc not in enabled_codes:
+                continue  # 未开启修正的基金, 其快照由规则2(7天)清理, 这里不动
+            deleted += c.execute("DELETE FROM snapshots WHERE trade_date=? AND fund_code=?", (td, fc)).rowcount
+        # 规则2: 7 天兜底
+        cur2 = c.execute("SELECT DISTINCT trade_date, fund_code FROM snapshots WHERE trade_date < ?", (cutoff,))
+        for td, fc in cur2.fetchall():
+            deleted += c.execute("DELETE FROM snapshots WHERE trade_date=? AND fund_code=?", (td, fc)).rowcount
+        c.commit()
+    finally:
+        c.close()
+    if deleted > 0:
+        vacuum_db()
+    return deleted
+
+
+@_retry
+def vacuum_db():
+    """回收 SQLite 删除后的空闲空间(DELETE 不会自动缩小文件, 必须 VACUUM)。
+    使用 autocommit 隔离级别, 避免 VACUUM 处于事务内报错。"""
+    c = _conn()
+    try:
+        c.isolation_level = None
+        c.execute("VACUUM")
+    finally:
+        c.close()
 
 def query(table, limit=None, order="ASC"):
     init_db()

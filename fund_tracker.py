@@ -873,8 +873,13 @@ def run():
         result["funds"][code] = fobj
 
     # 延迟补生成修正记录(某交易日官方净值已发布 -> 生成"模型预估 vs 官方实际")
-    made_corr = fund_db.generate_corrections()
+    # 仅对开启"预估修正"开关的基金生成(默认关闭); 生成后清理冗余快照并 VACUUM
+    fc_cfg = fund_db.kv_get("funds.json") or {}
+    funds_cfg = fc_cfg.get("funds", {}) if isinstance(fc_cfg, dict) else {}
+    enabled_codes = {c for c, f in funds_cfg.items() if (f or {}).get("est_correction")}
+    made_corr, purged_snaps = fund_db.generate_corrections(enabled_codes=enabled_codes)
     result["corrections_generated"] = made_corr
+    result["snapshots_purged"] = purged_snaps
     result["db_stats"] = fund_db.stats()
 
     # 统一入库(app_kv): 不再写磁盘 JSON(数据真相源为数据库)

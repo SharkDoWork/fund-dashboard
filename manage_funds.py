@@ -448,6 +448,24 @@ def do_purge(args):
     n = fund_db.purge_fund(code)
     print(f"已彻底删除 {code} 的全部数据(基础信息/买卖记录/历史净值{n and ', 库表记录 ' + str(n) + ' 条' or ''}); 重新 add {code} 将重新抓取")
 
+def do_est_correction(args):
+    """开启/关闭某基金的'预估修正'开关(默认关闭)。off 时清理该基金已有修正记录与快照。"""
+    code = args.code.strip()
+    enabled = args.state == "on"
+    cfg = load()
+    if code not in cfg["funds"]:
+        print(f"{code} 不存在于基金列表")
+        sys.exit(1)
+    cfg["funds"][code]["est_correction"] = enabled
+    save(cfg)
+    if not enabled:
+        nc = fund_db.delete_corrections_for_fund(code)
+        ns = fund_db.delete_snapshots_for_fund(code)
+        fund_db.vacuum_db()
+        print(f"已关闭 {code} 的预估修正; 清理修正记录 {nc} 条 / 快照 {ns} 条, 已回收数据库空间")
+    else:
+        print(f"已开启 {code} 的预估修正(下次同步将生成'模型预估 vs 官方实际'修正记录)")
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="管理基金与持仓金额配置")
     sub = ap.add_subparsers(dest="cmd")
@@ -476,6 +494,9 @@ if __name__ == "__main__":
     pt.add_argument("--clear", action="store_true", help="清仓: 标记该笔卖出为清空全部剩余份额(用于消除四舍五入碎片残余)")
     ptl = sub.add_parser("trades"); ptl.add_argument("code", nargs="?")
     ptd = sub.add_parser("tradedel"); ptd.add_argument("id")
+    pe = sub.add_parser("est-correction", help="开启/关闭某基金的'预估修正'记录(默认关闭)")
+    pe.add_argument("code")
+    pe.add_argument("state", choices=["on", "off"], help="on=开启预估修正, off=关闭(关闭后不生成且不显示修正, 并清理该基金已有修正与快照)")
     args = ap.parse_args()
     if not args.cmd:
         do_list()
@@ -489,3 +510,4 @@ if __name__ == "__main__":
     elif args.cmd == "trade": do_trade_add(args)
     elif args.cmd == "trades": do_trade_list(args)
     elif args.cmd == "tradedel": do_trade_del(args)
+    elif args.cmd == "est-correction": do_est_correction(args)
