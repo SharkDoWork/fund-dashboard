@@ -973,9 +973,15 @@ function mgrInit(){
         row.querySelectorAll(".mg-in").forEach(function(inp){ payload[inp.getAttribute("data-f")] = inp.value; });
         setBtnBusy(btn, "保存中…");
         apiPost("/api/funds/save", payload, function(err, j){
-          msg.textContent = (err || !j || !j.ok) ? "保存失败: " + ((j && j.message) || err) : "已保存, 正在刷新数据...";
-          if(j && j.ok) setTimeout(function(){ location.reload(); }, 1500);
-          else { clearBtnBusy(btn, "保存"); }
+          if(j && j.ok){
+            msg.textContent = "已保存 ✓ 持仓已局部刷新";
+            clearBtnBusy(btn, "保存");
+            // 后端已秒级重建看板; 此处仅局部同步该卡片数值, 不整页重载
+            setTimeout(function(){ refreshTradeFund(code); }, 300);
+          } else {
+            msg.textContent = "保存失败: " + ((j && j.message) || err);
+            clearBtnBusy(btn, "保存");
+          }
         });
       });
     });
@@ -1498,10 +1504,11 @@ function mgrAdd(){
   setBtnBusy(btn, "添加中…");
   apiPost("/api/funds/add", payload, function(err, j){
     if(j && j.ok){
-      /* 添加完成后刷新整页(重新生成看板 + 引擎已抓取新基金数据), 确保主看板立即可见新基金 */
-      msg.innerHTML = '<span style="color:#16a34a">✓ 已添加 ' + payload.code + (payload.name ? ' (' + payload.name + ')' : '') + '，正在刷新页面…</span>';
+      /* 后端已秒级重建看板(新增基金净值已抓入库)。先尝试局部刷新: 若新基金已在 CFG 则局部更新,
+         否则 refreshTradeFund 内部回退整页刷新(新卡片需进入 DOM)。添加基金不再卡在 ~13s 全量同步。 */
+      msg.innerHTML = '<span style="color:#16a34a">✓ 已添加 ' + payload.code + (payload.name ? ' (' + payload.name + ')' : '') + '，正在刷新…</span>';
       clearBtnBusy(btn, "添加基金");
-      setTimeout(function(){ location.reload(); }, 900);
+      setTimeout(function(){ refreshTradeFund(payload.code); }, 300);
     } else {
       clearBtnBusy(btn, "添加基金");
       msg.textContent = "添加失败: " + ((j && j.message) || err);

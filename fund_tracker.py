@@ -628,26 +628,64 @@ def _read_nav_history_desc(code):
 
 
 def refresh_positions_only():
-    """轻量刷新(交易增删后秒级更新看板, 不触发联网净值同步):
+    """轻量刷新(交易增删/保存/添加基金后秒级更新看板, 不触发全量联网净值同步):
     仅用库内最新 trades.json 重算各基金 trades/trade_summary/position 并写回 latest.json 快照,
-    保留原 nav_history/holdings/official/est 等, 避免 refresh_engine 的 ~50s 联网阻塞导致
-    客户端超时重试 -> 同一笔交易被写两次。"""
+    保留原 nav_history/holdings/official/est 等, 避免 refresh_engine 的 ~13s 全量联网阻塞;
+    对 funds.json 中尚未进入快照的新增基金, 仅抓取该基金净值(ensure_nav_history, ~1 请求)后
+    补建最小可用快照条目(仓位/净值曲线立即可见, 持仓明细/实时行情待下次完整同步补充)。
+    返回 True; 全新空库(无快照)时退化为完整引擎(run)。
+    全程不重跑行情/估算建模, 因此保存/添加基金由 ~13s 降到 ~1s 级。"""
     global TRADES_BY_CODE, TRADE_SUMMARY
+    fund_db.init_db()
     TRADES_BY_CODE, TRADE_SUMMARY = load_trades_summary()
     snap = fund_db.kv_get("latest.json")
+    fc = fund_db.kv_get("funds.json") or {}
+    FUNDS_CFG = fc.get("funds", {}) if isinstance(fc, dict) else {}
+    # BUILD: 与 run() 一致的 meta(持仓金额在 meta["position"] 下), compute_position 才能正确读取手动配置;
+    # 此处重算需用 BUILD 而非原始 funds.json, 否则手动(无交易)基金的持仓金额会被算成 0。
+    BUILD = build_funds()
     if not snap or not (snap.get("funds")):
         # 无快照则退化为完整引擎(会联网建快照)
         return run()
-    fc = fund_db.kv_get("funds.json") or {}
-    FUNDS_CFG = fc.get("funds", {}) if isinstance(fc, dict) else {}
-    for code, fobj in snap["funds"].items():
-        meta = FUNDS_CFG.get(code, {}) or {}
+    snap_funds = snap.setdefault("funds", {})
+    # 1) 已有快照: 仅重算交易/持仓(不联网)
+    for code, fobj in snap_funds.items():
+        meta = BUILD.get(code) or FUNDS_CFG.get(code, {}) or {}
         fobj.setdefault("est", {})
         fobj.setdefault("official", {})
         nav_history = _read_nav_history_desc(code)
         fobj["trades"] = TRADES_BY_CODE.get(code, [])
         fobj["trade_summary"] = TRADE_SUMMARY.get(code, {})
         fobj["position"] = compute_position(code, meta, fobj, nav_history)
+    # 2) 新增基金(在 funds.json 但不在快照): 仅抓取该基金净值, 补建最小可用快照条目
+    for code, meta_cfg in FUNDS_CFG.items():
+        if meta_cfg.get("hidden"):
+            continue
+        if code in snap_funds:
+            continue
+        meta = BUILD.get(code) or {}
+        if not meta:
+            continue
+        try:
+            ensure_nav_history(code)  # 该基金净值入历史库(已有则增量更新, 仅 ~1 次请求)
+        except Exception:
+            # 抓取失败(离线/代码无效) -> 跳过该基金, 保留其他基金刷新成功
+            continue
+        nav_history = _read_nav_history_desc(code)
+        name = meta.get("name") or f"基金{code}"
+        fobj = {
+            "fund_code": code, "fund_name": name, "type": meta.get("type") or "MUTUAL",
+            "tags": meta.get("tags") or [],
+            "holdings_quarter": "", "holdings_report_date": "",
+            "holdings_penetrated": False, "holdings_direct": [], "holdings": [],
+            "realtime": False,
+            "baseline": {"desc": "新增基金, 待下次完整同步补充基线/持仓/实时行情"},
+            "est": {}, "official": {}, "stocks": [],
+            "trades": TRADES_BY_CODE.get(code, []),
+            "trade_summary": TRADE_SUMMARY.get(code, {}),
+            "position": compute_position(code, meta, {"est": {}, "official": {}}, nav_history),
+        }
+        snap_funds[code] = fobj
     snap["generated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     fund_db.kv_set("latest.json", snap)
     return True

@@ -151,6 +151,14 @@ def refresh_light():
     r = subprocess.run([PY, os.path.join(BASE, "make_dashboard.py")], capture_output=True, text=True, timeout=60, close_fds=True)
     return r.stdout[-400:] + r.stderr[-300:]
 
+def refresh_positions_and_dashboard():
+    """轻量刷新(保存/添加/交易增删后秒级更新看板, 不触发全量联网净值同步):
+    用库内最新 trades 重算各基金持仓快照(新增基金仅抓该基金净值), 再重建 dashboard.html。
+    相比 refresh_engine 的全量联网建模(~13s), 此路径仅 ~1s 级, 是"保存/添加基金变快"的核心。"""
+    _ok_pos, log_pos = _run_script("fund_tracker.py", "refreshpositions")
+    _ok, log = _run_script("make_dashboard.py")
+    return (log_pos + "\n" + log)[-400:]
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 静默日志
@@ -375,8 +383,10 @@ class Handler(BaseHTTPRequestHandler):
             if r.returncode != 0:
                 self._json({"ok": False, "message": msg})
                 return
+            # 轻量刷新: 现有基金已有快照, 仅重算持仓快照 + 重建看板(秒级, 不联网),
+            # 避免 refresh_engine 全量联网建模(~13s)导致保存卡顿
             with SYNC_LOCK:
-                log = refresh_engine()
+                log = refresh_positions_and_dashboard()
             self._json({"ok": True, "message": f"已保存并刷新: {msg}", "engine": log[-400:]})
         elif path == "/api/settings":
             cur = fund_db.kv_get("settings.json") or {}
@@ -410,8 +420,10 @@ class Handler(BaseHTTPRequestHandler):
             if r.returncode != 0:
                 self._json({"ok": False, "message": msg})
                 return
+            # 轻量刷新: refresh_positions_only 会为新增基金抓取其净值(单基金 ~1 请求)并补建快照,
+            # 再重建看板; 不再全量联网建模全部基金(~13s) -> 添加基金由 ~13s 降到 ~1s 级
             with SYNC_LOCK:
-                log = refresh_engine()
+                log = refresh_positions_and_dashboard()
             self._json({"ok": True, "message": f"已添加并刷新: {msg}", "engine": log[-400:]})
         elif path == "/api/funds/hide":
             code = str(data.get("code", "")).strip()
