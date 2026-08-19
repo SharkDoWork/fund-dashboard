@@ -321,6 +321,9 @@ function posCell(label, value, cls){
 }
 function posHTML(f, key){
   var p = f.position || {};
+  if(f.type === "INDEX"){
+    return '<div class="pos pos-empty" id="pos_' + key + '">指数标的 — 无个人持仓(仅跟踪指数与成分股做判断)</div>';
+  }
   if(!p.configured){
     return '<div class="pos pos-empty" id="pos_' + key + '">未持仓 (金额为 0) — 添加买入记录后自动计算持仓与收益</div>';
   }
@@ -356,10 +359,12 @@ function penSuffix(f){
 }
 function cardHTML(f, key){
   var idx = CFG.indices[key] || {};
-  var typeBadge = f.type === "ETF" ? '<span class="badge b-etf">场内ETF</span>' : '<span class="badge b-mut">场外混合</span>';
+  var typeBadge = f.type === "ETF" ? '<span class="badge b-etf">场内ETF</span>'
+    : f.type === "INDEX" ? '<span class="badge b-idx">指数</span>'
+    : '<span class="badge b-mut">场外混合</span>';
   var rows = f.stocks.map(function(s){
     return '<tr data-code="' + s.sina + '"><td class="nm">' + s.name + '</td><td class="num">' + s.code + '</td>' +
-      '<td class="num">' + Number(s.weight).toFixed(2) + '%</td>' +
+      '<td class="num">' + (s.weight == null ? "—" : Number(s.weight).toFixed(2) + '%') + '</td>' +
       '<td class="num px">—</td><td class="num py" style="color:#9ca3af">—</td>' +
       '<td class="num pt">—</td></tr>';
   }).join("");
@@ -380,15 +385,21 @@ function cardHTML(f, key){
     directHTML = '<div class="direct"><div class="direct-title">当前基金直接持仓</div><ul class="direct-list">' + ditems + '</ul>' +
       (f.holdings_penetrated ? '<div class="direct-note">下方股票 = 穿透聚合后全部成分股权重（按持有比例折算，同股票经多路径持有则权重求和）</div>' : '') + '</div>';
   }
+  var isIdx = f.type === "INDEX";
   var body = [
-    '<div class="sub" id="sub_' + key + '">' + (f.official_snapshot_desc ? "快照参考: " + f.official_snapshot_desc + " · " : "") + "持仓披露 " + f.quarter + " (" + f.report_date + ")" + penSuffix(f) + '</div>',
-    '<div class="base">基线(前一日收盘准确数据): ' + f.baseline_desc + '</div>',
-    '<div class="model"><span class="tag">实时模型预估(持仓加权' + (f.coverage == null ? "—" : f.coverage) + '%)</span> <span id="model_' + key + '">—</span>' +
-      (idx.name ? ' <span class="src">余量指数[' + idx.name + '] <span id="idx_' + key + '">—</span></span>' : '') + '</div>',
+    '<div class="sub" id="sub_' + key + '">' + (isIdx ? '指数成分股实时行情 · 来源: 腾讯行情'
+      : ((f.official_snapshot_desc ? "快照参考: " + f.official_snapshot_desc + " · " : "") + "持仓披露 " + f.quarter + " (" + f.report_date + ")" + penSuffix(f))) + '</div>',
+    (isIdx
+      ? '<div class="base">成分股 ' + f.stocks.length + ' 只 · 涨跌幅实时(以昨收为锚) · 指数自身点位见卡片右上角</div>'
+      : '<div class="base">基线(前一日收盘准确数据): ' + f.baseline_desc + '</div>'),
+    (isIdx
+      ? '<div class="model"><span class="tag">指数实时涨跌</span> <span id="model_' + key + '">—</span></div>'
+      : '<div class="model"><span class="tag">实时模型预估(持仓加权' + (f.coverage == null ? "—" : f.coverage) + '%)</span> <span id="model_' + key + '">—</span>' +
+        (idx.name ? ' <span class="src">余量指数[' + idx.name + '] <span id="idx_' + key + '">—</span></span>' : '') + '</div>'),
     posHTML(f, key),
     directHTML,
-    '<div class="navsec"><div class="nav-tabs" id="navtabs_' + key + '">' + navTabs + '</div><div id="navchart_' + key + '" class="navchart"></div></div>',
-    '<div id="chart_' + key + '" class="chart"></div>',
+    (isIdx ? '' : '<div class="navsec"><div class="nav-tabs" id="navtabs_' + key + '">' + navTabs + '</div><div id="navchart_' + key + '" class="navchart"></div></div>'),
+    (isIdx ? '' : '<div id="chart_' + key + '" class="chart"></div>'),
     '<table class="tbl"><thead><tr><th>名称</th><th class="num">代码</th><th class="num">权重(聚合)</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">行情时间</th></tr></thead><tbody>' + rows + '</tbody></table>',
     '<div class="note">注: 价格为实时行情, 当日涨跌幅以"昨收"为锚(即前一日收盘准确数据); 可在顶部选择 20s/60s 自动刷新, 或点"手动刷新"更新, 暂停则不再自动刷新</div>'
   ].join("");
@@ -757,6 +768,23 @@ function applyQuotes(q){
     var big = null, badge = "";
     var hist = f.nav_latest || {};
     var histChg = (hist.chg_pct == null || isNaN(hist.chg_pct)) ? null : Number(hist.chg_pct);
+    if(f.type === "INDEX"){
+      /* 指数标的: 主涨跌 = 指数自身点位实时涨跌; 成分股表格由上方 stocks 循环实时更新 */
+      var self = f.self_sina ? q[f.self_sina] : null;
+      if(self && self.chg != null){
+        big = self.chg;
+        badge = '<span class="rt-badge">实时·指数点位 ' + self.price + ' (' + sv(self.chg) + '%) @ ' + fmtTs(self.ts) + '</span>';
+      } else {
+        big = histChg;
+        badge = '<span class="hb-badge">指数非实时 ' + (hist.date || "") + ' ' + (histChg == null ? "—" : sv(histChg) + "%") + '</span>';
+      }
+      document.getElementById("chg_" + key).textContent = (big == null ? "—" : sv(big) + "%");
+      document.getElementById("chg_" + key).style.color = col(big);
+      document.getElementById("sub_" + key).innerHTML = badge + ' · 指数成分股 ' + f.stocks.length + ' 只 · 来源: 腾讯行情';
+      var mEl = document.getElementById("model_" + key);
+      if(mEl){ mEl.textContent = "—"; mEl.style.color = "#9ca3af"; }
+      return;
+    }
     if(f.type === "ETF"){
       var self = f.self_sina ? q[f.self_sina] : null;
       if(self){ big = self.chg; badge = '<span class="rt-badge">实时·场内价 ' + self.price + ' (' + sv(self.chg) + '%) @ ' + fmtTs(self.ts) + '</span>'; }

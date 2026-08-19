@@ -397,6 +397,13 @@ def load_or_create_baseline(day, funds_meta):
     if base is not None:
         changed = False
         for code, meta in funds_meta.items():
+            if meta.get("type") == "INDEX":
+                # 指数标的无基金净值: 跳过净值拉取(基线为空, 实时点位由 INDEX 分支提供)
+                if code not in base["funds"]:
+                    base["funds"][code] = {"fund_code": code, "fund_name": meta["name"], "baseline": {},
+                                           "nav_history": [], "source": "指数实时点位(无基金净值)"}
+                    changed = True
+                continue
             if code not in base["funds"]:
                 # 当日中途新增基金: 补拉净值并锁定基线, 并入当日基线
                 try:
@@ -422,6 +429,10 @@ def load_or_create_baseline(day, funds_meta):
         return base, False
     base = {"day": day, "funds": {}, "created_at": datetime.datetime.now().isoformat(timespec="seconds")}
     for code, meta in funds_meta.items():
+        if meta.get("type") == "INDEX":
+            base["funds"][code] = {"fund_code": code, "fund_name": meta["name"], "baseline": {},
+                                   "nav_history": [], "source": "指数实时点位(无基金净值)"}
+            continue
         nav = fetch_lsjz(code, n=30)
         prev = nav[0] if nav else None  # 最近一个已公布净值日 = 前一日收盘(若今天盘中未公布今日净值)
         entry = {"fund_code": code, "fund_name": meta["name"], "baseline": {}, "nav_history": nav,
@@ -627,6 +638,79 @@ def _read_nav_history_desc(code):
     return out
 
 
+# ---------------------------------------------------------------- 指数标的(399xxx)
+def fetch_index_constituents(code):
+    """腾讯行情: 指数成分股及实时行情(涨跌幅/最新价)。
+    返回 [{code, name, chg_pct, price}, ...] 或 []"""
+    sym = ("sz" if str(code).startswith("399") else "sh") + str(code)
+    try:
+        txt = http_get("https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList?"
+                       f"board_code={sym}&sort_type=price&direct=down&offset=0&count=100",
+                       ref="https://stockapp.finance.qq.com/", timeout=20, tries=2)
+        j = json.loads(txt)
+        rows = ((j.get("data") or {}).get("rank_list")) or []
+        out = []
+        for r in rows:
+            c = r.get("code") or ""
+            m = re.match(r"^(sh|sz)(\d{6})$", c)
+            if not m:
+                continue
+            def _f(x):
+                try:
+                    return float(x)
+                except (ValueError, TypeError):
+                    return None
+            out.append({"code": m.group(2), "name": r.get("name") or m.group(2),
+                        "chg_pct": _f(r.get("zdf")), "price": _f(r.get("zxj"))})
+        return out
+    except Exception:
+        return []
+
+
+def build_index_fund(code, meta, now, st, base_entry):
+    """指数型标的(399xxx): 指数实时点位/涨跌 + 成分股列表及实时行情。返回 fobj"""
+    sym = ("sz" if str(code).startswith("399") else "sh") + str(code)
+    q = fetch_sina_batch([sym]).get(sym)
+    constituents = fetch_index_constituents(code) or []
+    # 成分股实时行情由腾讯 getBoardRankList 自带(zdf涨跌幅/zxj最新价)
+    stocks = []
+    for it in constituents:
+        stocks.append({"code": it["code"], "name": it["name"], "weight_pct": None,
+                       "sina": sina_symbol(it["code"]), "price": it["price"],
+                       "prev_close": None, "chg_pct": it["chg_pct"], "quote_time": ""})
+    official = {"type": "指数实时点位", "quote_time": "", "source": f"新浪行情 {sym}"}
+    realtime = False
+    if q and q["prev_close"] > 0 and q["current"] > 0:
+        ichg = round((q["current"] - q["prev_close"]) / q["prev_close"] * 100.0, 2)
+        official.update({"name": q["name"], "price": q["current"], "prev_close": q["prev_close"],
+                         "chg_pct": ichg, "quote_time": f"{q['date']} {q['time']}"})
+        realtime = True
+    else:
+        official["chg_pct"] = None
+    be = base_entry or {}
+    fobj = {
+        "fund_code": code, "fund_name": meta.get("name") or code, "type": "INDEX",
+        "self_sina": sym, "tags": meta.get("tags") or [],
+        "holdings_quarter": "", "holdings_report_date": "",
+        "holdings_penetrated": False, "holdings_direct": [],
+        "baseline": be.get("baseline") or {"desc": "指数标的, 无基金净值基线"},
+        "baseline_source": be.get("source") or "指数实时点位",
+        "trades": TRADES_BY_CODE.get(code, []),
+        "trade_summary": TRADE_SUMMARY.get(code, {}),
+        "stocks": stocks, "est": {}, "official": official,
+        "position": {"configured": False},
+        "realtime": realtime,
+    }
+    fobj["est"]["disclosed_coverage_pct"] = 0.0
+    fobj["est"]["model_change_pct"] = None
+    if realtime:
+        fobj["est"]["index"] = {"name": official["name"], "chg_pct": official["chg_pct"]}
+        fobj["est"]["adjusted_model_change_pct"] = official["chg_pct"]
+    else:
+        fobj["est"]["adjusted_model_change_pct"] = None
+    return fobj
+
+
 def refresh_positions_only():
     """轻量刷新(交易增删/保存/添加基金后秒级更新看板, 不触发全量联网净值同步):
     仅用库内最新 trades.json 重算各基金 trades/trade_summary/position 并写回 latest.json 快照,
@@ -651,6 +735,9 @@ def refresh_positions_only():
     # 1) 已有快照: 仅重算交易/持仓(不联网)
     for code, fobj in snap_funds.items():
         meta = BUILD.get(code) or FUNDS_CFG.get(code, {}) or {}
+        if meta.get("type") == "INDEX":
+            # 指数标的: 成分股/行情由完整引擎(run)或新增基金分支维护, 轻量刷新不动
+            continue
         fobj.setdefault("est", {})
         fobj.setdefault("official", {})
         nav_history = _read_nav_history_desc(code)
@@ -665,6 +752,14 @@ def refresh_positions_only():
             continue
         meta = BUILD.get(code) or {}
         if not meta:
+            continue
+        if meta.get("type") == "INDEX":
+            # 新增指数: 直接抓成分股+行情建条目(联网, ~2 请求, 单指数秒级)
+            try:
+                snap_funds[code] = build_index_fund(code, meta, datetime.datetime.now(),
+                                                    market_status(datetime.datetime.now()), {})
+            except Exception:
+                continue
             continue
         try:
             ensure_nav_history(code)  # 该基金净值入历史库(已有则增量更新, 仅 ~1 次请求)
@@ -759,6 +854,19 @@ def run():
                   "estimate": "新浪 fu_ 估算净值",
               }}
     for code, meta in FUNDS.items():
+        if meta.get("type") == "INDEX":
+            # 指数标的: 实时点位/涨跌 + 成分股列表及行情
+            fobj = build_index_fund(code, meta, now, st, base["funds"].get(code))
+            off = fobj["official"]
+            fund_db.add_snapshot({
+                "ts": now.isoformat(timespec="seconds"), "fund_code": code, "trade_date": day,
+                "model_chg_pct": None, "adjusted_chg_pct": off.get("chg_pct"),
+                "official_live_chg_pct": off.get("chg_pct"),
+                "live_price": off.get("price"), "baseline_date": None, "baseline_nav": None,
+                "market_status": st, "quote_time": off.get("quote_time"),
+            })
+            result["funds"][code] = fobj
+            continue
         d = direct_map.get(code, {"stock_rows": [], "fund_rows": [], "quarter": "", "report_date": ""})
         # 递归穿透: 聚合所有底层股票权重(同股票多路径求和, 含环检测)
         agg = aggregate_stocks(code, direct_map)

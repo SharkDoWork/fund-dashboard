@@ -83,21 +83,10 @@ goto menu
 
 :stop_srv
 echo [%date% %time%] stop_srv >> "%LOG%"
-set "SRV_PID="
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8123" ^| findstr "LISTENING"') do set SRV_PID=%%p
-if not defined SRV_PID (
-  echo.
-  echo   [提示] 服务未在运行。
-  pause
-  goto menu
-)
-echo   正在关闭服务 PID=!SRV_PID! ...
-taskkill /F /PID !SRV_PID! >nul 2>&1
-timeout /t 1 /nobreak >nul
-set "SRV_PID="
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8123" ^| findstr "LISTENING"') do set SRV_PID=%%p
-if defined SRV_PID (
-  echo   [警告] 端口仍被 PID=!SRV_PID! 占用, 可能关闭失败, 请重试。
+echo   正在关闭服务(端口 8123)...
+powershell -NoProfile -Command "$ids=(Get-NetTCPConnection -LocalPort 8123 -State Listen -ErrorAction SilentlyContinue).OwningProcess; if($ids){$ids|ForEach-Object{Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; Write-Output ('killed PID '+$_)}; Start-Sleep -Seconds 1; $left=(Get-NetTCPConnection -LocalPort 8123 -State Listen -ErrorAction SilentlyContinue).OwningProcess; if($left){exit 1}else{exit 0}}else{Write-Output 'no listener'}"
+if errorlevel 1 (
+  echo   [警告] 端口仍被占用(多半是权限不足), 请以管理员身份运行本脚本重试。
 ) else (
   echo   服务已关闭。
 )

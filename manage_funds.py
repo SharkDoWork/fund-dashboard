@@ -257,6 +257,43 @@ def fetch_fund_meta(code):
             return it
     return None
 
+def is_index_code(code):
+    """识别指数代码: 399 开头 6 位 = 深交所国证/深证指数(如 399365 国证粮食)。返回 True/False"""
+    s = str(code).strip()
+    return s.isdigit() and len(s) == 6 and s.startswith("399")
+
+def fetch_index_meta(code):
+    """新浪指数行情元数据: 名称/最新点位/昨收/涨跌幅。
+    指数格式: 名称,今开,昨收,最新,最高,最低,...(与股票同位置布局)。失败返回 None"""
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    s = str(code).strip()
+    sym = ("sz" if s.startswith("399") else "sh") + s
+    try:
+        u = f"https://hq.sinajs.cn/list={sym}"
+        req = urllib.request.Request(u, headers={"User-Agent": _UA, "Referer": "https://finance.sina.com.cn/"})
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            raw = r.read()
+        txt = raw.decode("gbk", "ignore")
+        m = re.search(r'"(.*)"', txt)
+        if not m or not m.group(1):
+            return None
+        p = m.group(1).split(",")
+        if not p or not p[0]:
+            return None
+        def _f(x):
+            try:
+                return float(x)
+            except (ValueError, TypeError):
+                return None
+        cur, pc = _f(p[3]) if len(p) > 3 else None, _f(p[2]) if len(p) > 2 else None
+        chg = round((cur - pc) / pc * 100.0, 2) if (cur is not None and pc) else None
+        return {"code": s, "name": p[0], "ftype": "指数",
+                "company": None, "manager": None, "themes": ["指数"],
+                "nav": cur, "nav_date": None, "fetched_ts": time.time(),
+                "index_price": cur, "index_prev_close": pc, "index_chg_pct": chg}
+    except Exception:
+        return None
+
 def _etf_prefix_ok(code):
     return str(code).startswith(("51", "56", "58", "15", "16"))
 
@@ -337,48 +374,58 @@ def do_add(args):
         return
     name = args.name or f"基金{code}"
     ftype = args.type or BUILTIN.get(code, {}).get("type") or guess_type(code)
+    is_idx = is_index_code(code)
+    if is_idx and not args.type:
+        ftype = "INDEX"
     entry = {"name": name, "type": ftype,
              "buy_amount": args.amount or 0, "shares": args.shares, "buy_nav": args.buy_nav}
     # 自动拉取真实元数据(名称/公司/类型/主题标签/最新净值), 失败则回退规则
-    meta = fetch_fund_meta(code)
+    # 指数代码走指数行情元数据(名称/点位), 基金走基金搜索接口
+    meta = fetch_index_meta(code) if is_idx else fetch_fund_meta(code)
     if meta:
         if not args.name:
             entry["name"] = name = meta.get("name") or name
         entry["meta"] = {k: meta.get(k) for k in
                          ("company", "manager", "ftype", "themes", "nav", "nav_date", "fetched_ts")}
-        if meta.get("buy_fee_pct") is not None:
+        if not is_idx and meta.get("buy_fee_pct") is not None:
             entry["buy_fee_rate"] = round(meta["buy_fee_pct"] / 100.0, 4)  # 申购费率(小数), 买入自动算手续费
     themes = (meta or {}).get("themes") or []
     mftype = (meta or {}).get("ftype") or ""
     # 联接基金自动映射估算锚(穿透底层ETF): 显式 --anchor > ANCHOR_MAP > 名称自动识别 > 已添加ETF名称匹配
-    if args.anchor:
-        a = args.anchor.strip()
-        if re.match(r"^\d{6}$", a):  # 纯6位数字代码 -> 补市场前缀(sh/sz), 保证新浪行情symbol有效
-            a = ("sh" if a.startswith(("5", "6", "9")) else "sz") + a
-        entry["anchor_tencent"], entry["anchor_name"] = a, args.anchor_name or f"跟踪锚{a}"
-    elif code in ANCHOR_MAP:
-        entry["anchor_tencent"], entry["anchor_name"] = ANCHOR_MAP[code]
-    else:
-        anchor = auto_detect_anchor(name, (meta or {}).get("company"))
-        if anchor:
-            entry["anchor_tencent"] = ("sh" if anchor[0].startswith(("5", "6", "9")) else "sz") + anchor[0]
-            entry["anchor_name"] = anchor[1]
+    # 指数自身即标的, 无需估算锚
+    if not is_idx:
+        if args.anchor:
+            a = args.anchor.strip()
+            if re.match(r"^\d{6}$", a):  # 纯6位数字代码 -> 补市场前缀(sh/sz), 保证新浪行情symbol有效
+                a = ("sh" if a.startswith(("5", "6", "9")) else "sz") + a
+            entry["anchor_tencent"], entry["anchor_name"] = a, args.anchor_name or f"跟踪锚{a}"
+        elif code in ANCHOR_MAP:
+            entry["anchor_tencent"], entry["anchor_name"] = ANCHOR_MAP[code]
         else:
-            # 兜底: 联接基金名称含某已添加ETF名 -> 自动锚定(无需手动--anchor)
-            for c, ex in cfg["funds"].items():
-                en = ex.get("name", "")
-                if en and en in name and ex.get("type") == "ETF":
-                    entry["anchor_tencent"] = ("sh" if c.startswith(("5", "6", "9")) else "sz") + c
-                    entry["anchor_name"] = en
-                    break
+            anchor = auto_detect_anchor(name, (meta or {}).get("company"))
+            if anchor:
+                entry["anchor_tencent"] = ("sh" if anchor[0].startswith(("5", "6", "9")) else "sz") + anchor[0]
+                entry["anchor_name"] = anchor[1]
+            else:
+                # 兜底: 联接基金名称含某已添加ETF名 -> 自动锚定(无需手动--anchor)
+                for c, ex in cfg["funds"].items():
+                    en = ex.get("name", "")
+                    if en and en in name and ex.get("type") == "ETF":
+                        entry["anchor_tencent"] = ("sh" if c.startswith(("5", "6", "9")) else "sz") + c
+                        entry["anchor_name"] = en
+                        break
     entry["tags"] = merge_tags(auto_tags(name, ftype, entry.get("anchor_tencent"), parse_tags(args.tags)),
                                mftype, themes)
     cfg["funds"][code] = entry
     save(cfg)
+    if meta:
+        extra = (f"  [指数 {meta.get('name') or code}]" if is_idx
+                 else f"  [{meta.get('company') or '?'}/{meta.get('manager') or '?'}/{mftype or '?'}]")
+    else:
+        extra = "  (元数据获取失败)"
     print(f"已添加 {code} {name} ({ftype})  买入金额 {entry['buy_amount']}"
           + (f"  估算锚: {entry['anchor_name']}({entry['anchor_tencent']})" if entry.get("anchor_tencent") else "")
-          + f"  分类: {'/'.join(entry['tags'])}"
-          + (f"  [{meta.get('company') or '?'}/{meta.get('manager') or '?'}/{mftype or '?'}]" if meta else "  (元数据获取失败)"))
+          + f"  分类: {'/'.join(entry['tags'])}" + extra)
 
 def do_set(args):
     cfg = load()
