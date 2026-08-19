@@ -23,14 +23,38 @@
 import json, os, subprocess, sys, threading, time, urllib.parse, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import fund_db
+import fund_tracker  # 板块行情看板数据层(东财缓存/解析/资金流反解)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 DASHBOARD = os.path.join(BASE, "dashboard.html")
+MARKET = os.path.join(BASE, "market.html")
+SECTOR = os.path.join(BASE, "sector.html")           # 板块行情看板查询页
 CONFIG = os.path.join(BASE, "config", "funds.json")   # 兼容读取源(迁移用), 数据真相源为数据库
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8123
 SYNC_LOCK = threading.Lock()
 SYNC_STATE = os.path.join(BASE, "data", "sync_state.json")  # 兼容备份路径
+BOARDS_REFRESH_LOCK = threading.Lock()
+
+
+def trigger_boards_refresh(force=False):
+    """后台刷新东财板块缓存(行情+资金流), 避免首个 /api/sector 请求阻塞 60-90s。
+    返回是否实际启动了刷新线程(已在刷新中则 False)。"""
+    if BOARDS_REFRESH_LOCK.locked():
+        return False
+    if not force and (fund_db.kv_get(fund_tracker._EM_BOARDS_KEY) or {}).get("items"):
+        return False  # 已有缓存, 无需后台刷新
+
+    def _run():
+        with BOARDS_REFRESH_LOCK:
+            try:
+                fund_tracker.fetch_em_all_boards(force=True)
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return True
 
 
 def open_read_shared(path):
@@ -190,6 +214,83 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Expires", "0")
             self.end_headers()
             self.wfile.write(body)
+        elif path in ("/market", "/market.html"):
+            """市场热点独立页(板块资金流): 由 make_dashboard.py 生成, 缺失时提示先跑引擎"""
+            if not os.path.exists(MARKET):
+                self._json({"ok": False, "message": "market.html 未生成 — 请先运行引擎同步(python fund_tracker.py)"}, 404)
+                return
+            try:
+                with open_read_shared(MARKET) as f:
+                    body = f.read()
+            except FileNotFoundError:
+                self._json({"ok": False, "message": "market.html 读取失败"}, 500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/sector", "/sector.html"):
+            """板块行情看板(行情+主力/散户资金流): 由 make_dashboard.py 生成"""
+            if not os.path.exists(SECTOR):
+                self._json({"ok": False, "message": "sector.html 未生成 — 请先运行引擎同步(python fund_tracker.py)"}, 404)
+                return
+            try:
+                with open_read_shared(SECTOR) as f:
+                    body = f.read()
+            except FileNotFoundError:
+                self._json({"ok": False, "message": "sector.html 读取失败"}, 500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/api/sector":
+            """板块行情看板数据接口: ?q=板块名称或BK码 -> 行情 + 主力/散户(五档)资金流。
+            缓存缺失时后台触发刷新并返回 loading, 前端轮询即可。"""
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = (qs.get("q") or [""])[0].strip()
+            if not q:
+                self._json({"ok": False, "message": "缺少查询参数 q(板块名称或 BK 码)"})
+                return
+            items = (fund_db.kv_get(fund_tracker._EM_BOARDS_KEY) or {}).get("items") or []
+            if not items:
+                trigger_boards_refresh(force=True)
+                self._json({"ok": True, "loading": True,
+                            "message": "板块数据缓存中, 请约 1 分钟后再查询(或刷新重试)"})
+                return
+            detail = fund_tracker.get_sector_detail(q)
+            if not detail:
+                # 尝试模糊兜底: 返回若干候选板块名, 便于前端提示
+                cands = [it.get("name") for it in items if q in (it.get("name") or "")][:8]
+                self._json({"ok": False, "message": f"未找到板块: {q}", "candidates": cands})
+                return
+            self._json({"ok": True, "detail": detail,
+                        "boards_updated_at": (fund_db.kv_get(fund_tracker._EM_BOARDS_KEY) or {}).get("updated_at")})
+        elif path == "/api/boards":
+            """板块行情总览: 返回 em_boards 缓存中全部板块(行业+概念)的行情+主力资金流,
+            供板块看板(sector.html)默认展示'全部板块'总览, 前端点击某行可下钻单个板块详情。"""
+            data = fund_db.kv_get(fund_tracker._EM_BOARDS_KEY) or {}
+            items = data.get("items") or []
+            if not items:
+                trigger_boards_refresh(force=True)
+                self._json({"ok": True, "loading": True,
+                            "message": "板块数据缓存中, 请约 1 分钟后再刷新重试"})
+                return
+            boards = [{
+                "code": it.get("code"), "name": it.get("name"), "kind": it.get("kind"),
+                "price": it.get("price"), "chg_pct": it.get("chg_pct"),
+                "vol": it.get("vol"), "turnover": it.get("turnover"),
+                "amplitude": it.get("amplitude"), "turnover_rate": it.get("turnover_rate"),
+                "main_net": it.get("main_net"), "main_ratio": it.get("main_ratio"),
+                "super_net": it.get("super_net"), "big_net": it.get("big_net"),
+                "mid_net": it.get("mid_net"), "small_net": it.get("small_net"),
+            } for it in items]
+            self._json({"ok": True, "boards": boards,
+                        "updated_at": data.get("updated_at"), "count": len(boards)})
         elif path in ("/favicon.ico", "/favicon.svg"):
             """站点图标(避免浏览器请求 /favicon.ico 返回 404)"""
             fp = os.path.join(BASE, "static", "favicon.svg")
@@ -585,6 +686,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     # 空库/全新环境: 先确保 dashboard.html 存在, 否则页面无法加载、导入 UI 不可达
     _ensure_dashboard()
+    # 后台预热板块缓存(行情看板数据源), 不阻塞服务启动
+    trigger_boards_refresh()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"基金看板服务已启动: http://127.0.0.1:{PORT}   (Ctrl+C 停止)")
     try:

@@ -210,16 +210,22 @@ def _exists_correction(trade_date, fund_code):
         c.close()
 
 def _snapshot_stats(trade_date, fund_code):
+    """统计该日快照: 预估值回退链 model_chg_pct -> adjusted_chg_pct -> official_live_chg_pct
+    (联接基金等无披露持仓模型的基金, 用当日实时通道涨跌作为'预估'参与修正)。"""
     c = _conn()
     try:
         cur = c.execute(
-            """SELECT COUNT(*), MIN(model_chg_pct), MAX(model_chg_pct)
-               FROM snapshots WHERE trade_date=? AND fund_code=? AND model_chg_pct IS NOT NULL""",
+            """SELECT COUNT(*),
+                      MIN(COALESCE(model_chg_pct, adjusted_chg_pct, official_live_chg_pct)),
+                      MAX(COALESCE(model_chg_pct, adjusted_chg_pct, official_live_chg_pct))
+               FROM snapshots WHERE trade_date=? AND fund_code=?
+               AND COALESCE(model_chg_pct, adjusted_chg_pct, official_live_chg_pct) IS NOT NULL""",
             (trade_date, fund_code))
         cnt, mn, mx = cur.fetchone()
         cur2 = c.execute(
-            """SELECT model_chg_pct, quote_time FROM snapshots
-               WHERE trade_date=? AND fund_code=? AND model_chg_pct IS NOT NULL
+            """SELECT COALESCE(model_chg_pct, adjusted_chg_pct, official_live_chg_pct), quote_time
+               FROM snapshots WHERE trade_date=? AND fund_code=?
+               AND COALESCE(model_chg_pct, adjusted_chg_pct, official_live_chg_pct) IS NOT NULL
                ORDER BY ts DESC LIMIT 1""", (trade_date, fund_code))
         last = cur2.fetchone()
         return cnt, mn, mx, last

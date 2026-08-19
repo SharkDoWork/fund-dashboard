@@ -711,6 +711,323 @@ def build_index_fund(code, meta, now, st, base_entry):
     return fobj
 
 
+# ---------------------------------------------------------------- 市场热点/资金流
+def code_to_secid(code):
+    """6位代码 -> 东财 secid: 5/6/9 开头沪市=1., 其余深市=0."""
+    c = str(code)
+    return ("1." if c and c[0] in ("5", "6", "9") else "0.") + c
+
+
+_EM_COOLDOWN_KEY = "em_api_cooldown"
+_EM_COOLDOWN_SECONDS = 300       # 进入冷却后跳过东财抓取 5 分钟
+_EM_MAX_CONSEC_FAIL = 3          # 连续失败 N 组请求 -> 进入冷却
+
+
+def _em_cooldown_load():
+    v = fund_db.kv_get(_EM_COOLDOWN_KEY)
+    return v if isinstance(v, dict) else {}
+
+
+def _em_cooldown_save(d):
+    try:
+        fund_db.kv_set(_EM_COOLDOWN_KEY, d)
+    except Exception:
+        pass
+
+
+def _em_json(url, tries=3, delay=3.0):
+    """东财 push2 请求: 每请求前等待 delay(防高频风控 RemoteDisconnected), 失败长退避重试。
+    冷却状态持久化到数据库(重启后仍记得): 连续失败达阈值 -> 冷却期内直接放弃本轮抓取。
+    返回解析后的 dict; 失败/冷却中返回 None。"""
+    import random
+    cd = _em_cooldown_load()
+    if (cd.get("until_ts") or 0) > time.time():
+        return None  # 冷却中: 不再撞墙, 由调用方用旧数据降级
+    for i in range(tries):
+        time.sleep(delay + random.random() * 1.5)
+        try:
+            txt = http_get(url, ref="https://quote.eastmoney.com/", timeout=15, tries=1)
+            j = json.loads(txt)
+            _em_cooldown_save({"until_ts": 0, "fail_count": 0, "last_fail": 0})  # 成功复位熔断
+            return j
+        except Exception:
+            time.sleep(6.0 * (i + 1))  # 单次请求内退避: 6s / 12s / 18s (跨次的长冷却由下方熔断管理)
+    cd2 = _em_cooldown_load()
+    fc = (cd2.get("fail_count") or 0) + 1
+    until = int(time.time()) + _EM_COOLDOWN_SECONDS if fc >= _EM_MAX_CONSEC_FAIL else 0
+    _em_cooldown_save({"until_ts": until, "fail_count": fc, "last_fail": int(time.time())})
+    return None
+
+
+def fetch_tencent_boards():
+    """腾讯板块(行业 hy + 概念 gn, 稳定无风控): pt/getRank 分页抓取。
+    返回 [{code,name,kind,chg_pct,main_net,main_in,main_out,leader,hsl,lb}, ...]
+    主力净流入单位: 腾讯返回万元, 统一转元(*1e4)。"""
+    boards = []
+    for kind, bt in (("行业", "hy"), ("概念", "gn")):
+        offset = 0
+        while offset < 600:
+            try:
+                txt = http_get(
+                    "https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank"
+                    f"?board_type={bt}&sort_type=price&direct=down&offset={offset}&count=100",
+                    ref="https://stockapp.finance.qq.com/", timeout=15, tries=2)
+                j = json.loads(txt)
+                rows = ((j.get("data") or {}).get("rank_list")) or []
+                if not rows:
+                    break
+                for r in rows:
+                    def _f(x):
+                        try:
+                            return float(x)
+                        except (ValueError, TypeError):
+                            return None
+                    lzg = r.get("lzg") or {}
+                    zljlr = _f(r.get("zljlr"))
+                    zllc = _f(r.get("zllc"))
+                    zllr = _f(r.get("zllr"))
+                    boards.append({
+                        "code": r.get("code"), "name": r.get("name"), "kind": kind,
+                        "chg_pct": _f(r.get("zdf")),
+                        "main_net": zljlr * 1e4 if zljlr is not None else None,   # 万 -> 元
+                        "main_in": zllc * 1e4 if zllc is not None else None,
+                        "main_out": zllr * 1e4 if zllr is not None else None,
+                        "leader": lzg.get("name") or "",
+                        "hsl": _f(r.get("hsl")), "lb": _f(r.get("lb")),
+                        "main_ratio": None, "small_net": None,
+                    })
+                if len(rows) < 100:
+                    break
+                offset += 100
+            except Exception:
+                break
+    return boards
+
+
+def fetch_stock_flows(codes):
+    """东财 ulist 个股资金流(稳定): 仅主力(f62)与散户/小单(f84)两档, 含占比(f184/f87, ×100/100)。
+    返回 {code: {main_net, main_ratio, small_net, small_ratio, chg_pct}}"""
+    out = {}
+    codes = [c for c in (codes or []) if c]
+    for i in range(0, len(codes), 100):
+        chunk = codes[i:i + 100]
+        secids = ",".join(code_to_secid(c) for c in chunk)
+        u = (f"https://push2.eastmoney.com/api/qt/ulist.np/get?secids={secids}"
+             f"&fields=f12,f14,f3,f62,f84,f184,f87")
+        j = _em_json(u, delay=2.0)
+        if not j:
+            break  # 限流/封禁: 停止剩余批次, 返回已抓到的
+        for it in ((j.get("data") or {}).get("diff") or []):
+            c = it.get("f12")
+            if not c:
+                continue
+            def _r(x):
+                return round(float(x) / 100.0, 2) if x is not None else None
+            out[c] = {
+                "main_net": it.get("f62"), "main_ratio": _r(it.get("f184")),
+                "small_net": it.get("f84"), "small_ratio": _r(it.get("f87")),
+                "chg_pct": round(float(it["f3"]) / 100.0, 2) if it.get("f3") is not None else None,
+            }
+    return out
+
+
+# ---------------------------------------------------------------- 板块行情 + 资金流(行情看板 /sector)
+_EM_Q_HOSTS = ["push2delay.eastmoney.com", "push2.eastmoney.com"]
+_EM_BOARDS_KEY = "em_boards"
+_EM_BOARDS_TTL = 600  # 板块列表(含行情+资金流)缓存 10 分钟
+
+
+def _to_f(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def em_fetch(url_tmpl, hosts=_EM_Q_HOSTS, tries=2, delay=2.0):
+    """东财多 host 请求: url_tmpl 含 __HOST__ 占位; 依次尝试各 host, 任一成功即返回解析 dict。
+    复用全局冷却机制(与个股 ulist 共享): 全部 host 失败才计一次失败(触发熔断), 成功即复位。
+    返回 dict 或 None。"""
+    import random
+    cd = _em_cooldown_load()
+    if (cd.get("until_ts") or 0) > time.time():
+        return None  # 冷却中: 不再撞墙
+    last = None
+    for host in hosts:
+        for i in range(tries):
+            time.sleep(delay + random.random() * 1.5)
+            try:
+                txt = http_get(url_tmpl.replace("__HOST__", host),
+                               ref="https://quote.eastmoney.com/", timeout=15, tries=1)
+                j = json.loads(txt)
+                _em_cooldown_save({"until_ts": 0, "fail_count": 0, "last_fail": 0})
+                return j
+            except Exception as e:
+                last = e
+                time.sleep(4.0 * (i + 1))
+    cd2 = _em_cooldown_load()
+    fc = (cd2.get("fail_count") or 0) + 1
+    until = int(time.time()) + _EM_COOLDOWN_SECONDS if fc >= _EM_MAX_CONSEC_FAIL else 0
+    _em_cooldown_save({"until_ts": until, "fail_count": fc, "last_fail": int(time.time())})
+    return None
+
+
+def fetch_em_all_boards(force=False):
+    """抓取东财全量板块(行业 t:2 + 概念 t:3)含行情+资金流字段, 缓存到 app_kv em_boards。
+    一次 clist 扫描即拿到 行情(价格/涨跌幅/成交量/成交额/振幅/换手) + 五档资金流(净+净占比),
+    供 /sector 查询页与首页板块自选卡片复用, 无需逐板块再发请求。
+    字段: f12(码) f14(名) f2(价) f3(涨%) f5(量) f6(额) f7(振幅%) f8(换手%)
+          f62(主力净) f184(主力净占比%) f66(超大净) f69 f72(大净) f75 f78(中净) f81 f84(小单净) f87
+    返回 items; 全失败返回旧缓存或 []。"""
+    cached = fund_db.kv_get(_EM_BOARDS_KEY)
+    if cached and not force:
+        ua = cached.get("updated_at")
+        fresh = False
+        if ua:
+            try:
+                dt = datetime.datetime.fromisoformat(str(ua))
+                fresh = (datetime.datetime.now() - dt).total_seconds() < _EM_BOARDS_TTL
+            except Exception:
+                pass
+        if fresh:
+            return cached.get("items") or []
+    items = []
+    try:
+        for kind, fs in (("行业", "m:90+t:2"), ("概念", "m:90+t:3")):
+            pn = 1
+            while pn <= 12:
+                u = ("https://__HOST__/api/qt/clist/get?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2"
+                     "&fs={fs}&fields=f12,f14,f2,f3,f5,f6,f7,f8,"
+                     "f62,f184,f66,f69,f72,f75,f78,f81,f84,f87").format(pn=pn, fs=fs)
+                j = em_fetch(u)
+                if not j:
+                    break  # 该 host 全失败 -> 熔断, 用已抓到的
+                diff = (j.get("data") or {}).get("diff") or []
+                if not diff:
+                    break
+                for it in diff:
+                    code = it.get("f12")
+                    if not code:
+                        continue
+                    items.append({
+                        "code": code, "name": it.get("f14"), "kind": kind,
+                        "price": _to_f(it.get("f2")), "chg_pct": _to_f(it.get("f3")),
+                        "vol": _to_f(it.get("f5")), "turnover": _to_f(it.get("f6")),
+                        "amplitude": _to_f(it.get("f7")), "turnover_rate": _to_f(it.get("f8")),
+                        "main_net": _to_f(it.get("f62")), "main_ratio": _to_f(it.get("f184")),
+                        "super_net": _to_f(it.get("f66")), "super_ratio": _to_f(it.get("f69")),
+                        "big_net": _to_f(it.get("f72")), "big_ratio": _to_f(it.get("f75")),
+                        "mid_net": _to_f(it.get("f78")), "mid_ratio": _to_f(it.get("f81")),
+                        "small_net": _to_f(it.get("f84")), "small_ratio": _to_f(it.get("f87")),
+                    })
+                if len(diff) < 100:
+                    break
+                pn += 1
+    except Exception:
+        pass
+    if items:
+        fund_db.kv_set(_EM_BOARDS_KEY, {"updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                                        "count": len(items), "items": items})
+        return items
+    old = fund_db.kv_get(_EM_BOARDS_KEY)
+    return (old or {}).get("items") or []
+
+
+def resolve_sector(q):
+    """名称或 BK 码 -> {code, name, kind, secid}。BK 码直接构造; 名称在 em_boards 缓存中模糊匹配。"""
+    q = (q or "").strip()
+    if not q:
+        return None
+    up = q.upper()
+    if re.match(r"^BK\d+$", up):
+        return {"code": up, "name": up, "kind": "板块", "secid": "90." + up}
+    items = (fund_db.kv_get(_EM_BOARDS_KEY) or {}).get("items") or []
+    if not items:
+        items = fetch_em_all_boards() or []
+    hit = next((it for it in items if it.get("name") == q), None)
+    if not hit:
+        hit = next((it for it in items if q in (it.get("name") or "")), None)
+    if not hit:
+        return None
+    return {"code": hit["code"], "name": hit["name"], "kind": hit.get("kind"), "secid": "90." + hit["code"]}
+
+
+def _derive_io(net, ratio_pct):
+    """由 净流入(net) 与 净占比(%) 反解 流入/流出(绝对额, 与 net 同单位)。
+    无占比(ratio 为 None/0)则无法反解 -> (None, None)。"""
+    if net is None or ratio_pct in (None, 0):
+        return None, None
+    try:
+        s = net * 100.0 / float(ratio_pct)  # 流入 + 流出 = 净额 / 净占比
+    except (TypeError, ZeroDivisionError, ValueError):
+        return None, None
+    return (s + net) / 2.0, (s - net) / 2.0
+
+
+def get_sector_detail(q):
+    """板块行情看板核心: 名称/BK -> 行情 + 五档资金流(净/流入/流出/占比)。
+    行情与资金流均来自 em_boards 缓存(clist 一次性抓取), 无需逐板块请求。
+    返回 None(未解析) 或 {name, code, kind, secid, quote{...}, flow{...}}。"""
+    rs = resolve_sector(q)
+    if not rs:
+        return None
+    items = (fund_db.kv_get(_EM_BOARDS_KEY) or {}).get("items") or []
+    it = next((x for x in items if x.get("code") == rs["code"]), None)
+    if not it:
+        items = fetch_em_all_boards() or []
+        it = next((x for x in items if x.get("code") == rs["code"]), None)
+    if not it:
+        return None
+
+    def tier(net, ratio):
+        nin, nout = _derive_io(net, ratio)
+        return {"net": net, "ratio": ratio, "in": nin, "out": nout}
+
+    flow = {
+        "main": tier(it.get("main_net"), it.get("main_ratio")),
+        "super": tier(it.get("super_net"), it.get("super_ratio")),
+        "big": tier(it.get("big_net"), it.get("big_ratio")),
+        "mid": tier(it.get("mid_net"), it.get("mid_ratio")),
+        "small": tier(it.get("small_net"), it.get("small_ratio")),
+    }
+    quote = {
+        "price": it.get("price"), "chg_pct": it.get("chg_pct"),
+        "vol": it.get("vol"), "turnover": it.get("turnover"),
+        "amplitude": it.get("amplitude"), "turnover_rate": it.get("turnover_rate"),
+    }
+    return {"name": it.get("name"), "code": it.get("code"), "kind": it.get("kind"),
+            "secid": rs["secid"], "quote": quote, "flow": flow}
+
+
+def build_market_snapshot(result):
+    """抓取板块资金流 + 全部成分股资金流, 写入 result[\"market\"]。
+    失败/熔断/冷却时: 从数据库旧快照保留 market 数据并标记 stale(页面提示可能过期),
+    不让市场数据缺失拖垮引擎。"""
+    _old_snap = fund_db.kv_get("latest.json") or {}
+    old = _old_snap.get("market") or {}
+    boards, flows = [], {}
+    try:
+        boards = fetch_tencent_boards()  # 腾讯板块(稳, 无风控)
+        if boards:
+            all_codes = set()
+            for f in result.get("funds", {}).values():
+                for s in f.get("stocks", []):
+                    if s.get("code"):
+                        all_codes.add(s["code"])
+            flows = fetch_stock_flows(list(all_codes))  # 东财 ulist 个股(主力/散户)
+    except Exception:
+        pass
+    stale = not (boards and flows)
+    result["market"] = {
+        "boards": boards or old.get("boards") or [],
+        "stocks_flow": flows or old.get("stocks_flow") or {},
+        "fetched_at": (datetime.datetime.now().isoformat(timespec="seconds")
+                       if (boards or flows) else (old.get("fetched_at") or "")),
+        "stale": stale,
+    }
+    return result
+
+
 def refresh_positions_only():
     """轻量刷新(交易增删/保存/添加基金后秒级更新看板, 不触发全量联网净值同步):
     仅用库内最新 trades.json 重算各基金 trades/trade_summary/position 并写回 latest.json 快照,
@@ -1027,6 +1344,17 @@ def run():
     result["corrections_generated"] = made_corr
     result["snapshots_purged"] = purged_snaps
     result["db_stats"] = fund_db.stats()
+
+    # 市场热点/资金流(板块 + 成分股主力资金): 失败保留旧数据, 不阻塞引擎
+    result = build_market_snapshot(result)
+
+    # 板块行情+资金流缓存(供 /sector 行情看板与首页板块自选卡片复用): TTL 内直接返回, 过期才刷新
+    try:
+        n_boards = fetch_em_all_boards()
+        if n_boards:
+            print(f"== 板块缓存 {len(n_boards)} 个(行情看板数据源)")
+    except Exception as e:
+        print(f"[warn] 板块缓存刷新失败(不影响主流程): {e}")
 
     # 统一入库(app_kv): 不再写磁盘 JSON(数据真相源为数据库)
     fund_db.kv_set("latest.json", result)
