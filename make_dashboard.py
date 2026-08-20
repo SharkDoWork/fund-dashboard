@@ -167,12 +167,14 @@ function tencentSymbols(){ var a = []; var funds = CFG.funds;
   Object.keys(funds).forEach(function(k){ var f = funds[k];
     f.stocks.forEach(function(s){ if(s.sina) a.push(s.sina); });
     if (f.self_sina) a.push(f.self_sina);
+    if (f.anchor_tencent) a.push(f.anchor_tencent);   /* 联接基金跟踪锚(ETF/指数)也要实时拉, 否则卡片 badge 拿不到实时锚 */
     if (CFG.indices[k] && CFG.indices[k].tencent) a.push(CFG.indices[k].tencent);
   }); return a.filter(function(v,i,self){ return v && self.indexOf(v) === i; }); }
 function emSecids(){ var a = []; var funds = CFG.funds;
   Object.keys(funds).forEach(function(k){ var f = funds[k];
     f.stocks.forEach(function(s){ if(s.code) a.push(codeToEM(s.code)); });
     if (f.self_sina && f.self_sina.length > 2) a.push(codeToEM(f.self_sina.slice(2)));
+    if (f.anchor_tencent && f.anchor_tencent.length > 2) a.push(codeToEM(f.anchor_tencent.slice(2)));
     if (CFG.indices[k] && CFG.indices[k].em) a.push(CFG.indices[k].em);
   }); return a.filter(function(v,i,self){ return v && self.indexOf(v) === i; }); }
 function codeToEM(code){ var c = String(code); return (c.charAt(0) === "6" || c.charAt(0) === "9" || c.charAt(0) === "5") ? "1." + c : "0." + c; }
@@ -448,7 +450,7 @@ function cardHTML(f, key){
     (isIdx ? '' : '<div class="navsec"><div class="nav-tabs" id="navtabs_' + key + '">' + navTabs + '</div><div id="navchart_' + key + '" class="navchart"></div></div>'),
     (isIdx ? '' : '<div id="chart_' + key + '" class="chart"></div>'),
     '<table class="tbl"><thead><tr><th>名称</th><th class="num">代码</th><th class="num">权重(聚合)</th><th class="num">主力净流入</th><th class="num">散户净流入</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">行情时间</th></tr></thead><tbody>' + rows + '</tbody></table>',
-    '<div class="note">注: 价格为实时行情, 当日涨跌幅以"昨收"为锚(即前一日收盘准确数据); 可在顶部选择 20s/60s 自动刷新, 或点"手动刷新"更新, 暂停则不再自动刷新</div>'
+    '<div class="note">注: 价格/涨跌幅/行情时间为实时行情(以"昨收"为锚); 可在顶部选择 20s/60s 自动刷新, 或点"手动刷新"更新, 暂停则不再自动刷新。主力/散户净流入来自东财个股资金流, 为最近交易日累计值(盘前快照=前一日全天), 与当日盘中行情非同一口径, 仅作参考, 请勿与现价/涨跌幅直接对应。</div>'
   ].join("");
   var starOn = starOf(key);
   return '<div class="card" id="card_' + key + '">' +
