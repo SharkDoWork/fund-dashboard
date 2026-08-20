@@ -17,8 +17,11 @@ data/nav_check_*.md
 dashboard.html
 market.html
 sector.html
+
 data/_dashboard_check.js
 data/fund_history.db
+
+*.html
 
 # WorkBuddy 项目本地数据(不入库)
 .workbuddy/

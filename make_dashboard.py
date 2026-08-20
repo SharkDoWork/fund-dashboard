@@ -2497,7 +2497,7 @@ __ECHARTS_INLINE__
 
 HTML = HTML.replace("__ECHARTS_INLINE__", ECHARTS_INLINE)
 
-def _atomic_write(path, text, attempts=15, wait=0.15):
+def _atomic_write(path, text, attempts=40, wait=0.3):
     """原子写: 先写同目录临时文件, 再 os.replace 覆盖。
     避免 live_server / VSCode / 杀软文件监视器正在读取目标文件时, 直接
     open('w') 独占写触发 Windows 共享冲突(PermissionError); 即便读句柄不带
@@ -2536,7 +2536,16 @@ def _atomic_write(path, text, attempts=15, wait=0.15):
             pass
         raise
 
-_atomic_write(os.path.join(BASE, "dashboard.html"), HTML)
+def _write_html_safe(path, text):
+    """HTML 写失败降级为警告(数据已落库, 模板下次同步自动重试)。
+    避免杀软/索引器扫描大 HTML 的瞬时文件锁让整个每日同步被标记失败。"""
+    try:
+        _atomic_write(path, text)
+    except Exception as e:
+        import sys
+        print(f"[WARN] {os.path.basename(path)} 写入失败(数据已生成, 下次同步重试): {e}", file=sys.stderr)
+
+_write_html_safe(os.path.join(BASE, "dashboard.html"), HTML)
 print("dashboard.html(实时版) 已生成, 长度", len(HTML))
 
 
@@ -2729,7 +2738,7 @@ apply();
 </script></body></html>""".replace("__ROWS__", rows).replace("__CNT__", str(len(boards))).replace("__FETCHED__", fetched)
 
 
-_atomic_write(os.path.join(BASE, "market.html"), render_market_page())
+_write_html_safe(os.path.join(BASE, "market.html"), render_market_page())
 print("market.html 已生成, 长度", len(open(os.path.join(BASE, "market.html"), encoding="utf-8").read()))
 
 
@@ -2921,5 +2930,5 @@ window._secTimer=setInterval(function(){ if(inDetail && curQ) query(curQ); else 
 </script></body></html>"""
 
 
-_atomic_write(os.path.join(BASE, "sector.html"), render_sector_page())
+_write_html_safe(os.path.join(BASE, "sector.html"), render_sector_page())
 print("sector.html 已生成, 长度", len(open(os.path.join(BASE, "sector.html"), encoding="utf-8").read()))
