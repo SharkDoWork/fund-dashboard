@@ -297,6 +297,14 @@ def fetch_index_meta(code):
 def _etf_prefix_ok(code):
     return str(code).startswith(("51", "56", "58", "15", "16"))
 
+def norm_tencent_symbol(a):
+    """纯6位数字代码补腾讯市场前缀(sh/sz), 保证行情/分时接口symbol有效"""
+    a = (a or "").strip()
+    if re.match(r"^\d{6}$", a):
+        a = ("sh" if a.startswith(("5", "6", "9")) else "sz") + a
+    return a
+
+
 def auto_detect_anchor(name, company=""):
     """联接基金 -> 底层场内ETF代码(普适化自动识别):
        名称解析(去'联接'+后缀) + 多关键词递进搜索(去公司前缀/去指数前缀) + 公司名匹配。
@@ -395,25 +403,27 @@ def do_add(args):
     # 指数自身即标的, 无需估算锚
     if not is_idx:
         if args.anchor:
-            a = args.anchor.strip()
-            if re.match(r"^\d{6}$", a):  # 纯6位数字代码 -> 补市场前缀(sh/sz), 保证新浪行情symbol有效
-                a = ("sh" if a.startswith(("5", "6", "9")) else "sz") + a
+            a = norm_tencent_symbol(args.anchor)
             entry["anchor_tencent"], entry["anchor_name"] = a, args.anchor_name or f"跟踪锚{a}"
         elif code in ANCHOR_MAP:
             entry["anchor_tencent"], entry["anchor_name"] = ANCHOR_MAP[code]
         else:
             anchor = auto_detect_anchor(name, (meta or {}).get("company"))
             if anchor:
-                entry["anchor_tencent"] = ("sh" if anchor[0].startswith(("5", "6", "9")) else "sz") + anchor[0]
+                entry["anchor_tencent"] = norm_tencent_symbol(anchor[0])
                 entry["anchor_name"] = anchor[1]
             else:
                 # 兜底: 联接基金名称含某已添加ETF名 -> 自动锚定(无需手动--anchor)
                 for c, ex in cfg["funds"].items():
                     en = ex.get("name", "")
                     if en and en in name and ex.get("type") == "ETF":
-                        entry["anchor_tencent"] = ("sh" if c.startswith(("5", "6", "9")) else "sz") + c
+                        entry["anchor_tencent"] = norm_tencent_symbol(c)
                         entry["anchor_name"] = en
                         break
+    # 分时锚(独立配置): 指定场内标的, 卡片展示其当日分时; 与估算锚解耦
+    if args.minute:
+        entry["minute_tencent"] = norm_tencent_symbol(args.minute)
+        entry["minute_name"] = args.minute_name or f"分时锚{entry['minute_tencent']}"
     entry["tags"] = merge_tags(auto_tags(name, ftype, entry.get("anchor_tencent"), parse_tags(args.tags)),
                                mftype, themes)
     cfg["funds"][code] = entry
@@ -425,6 +435,7 @@ def do_add(args):
         extra = "  (元数据获取失败)"
     print(f"已添加 {code} {name} ({ftype})  买入金额 {entry['buy_amount']}"
           + (f"  估算锚: {entry['anchor_name']}({entry['anchor_tencent']})" if entry.get("anchor_tencent") else "")
+          + (f"  分时锚: {entry['minute_name']}({entry['minute_tencent']})" if entry.get("minute_tencent") else "")
           + f"  分类: {'/'.join(entry['tags'])}" + extra)
 
 def do_set(args):
@@ -454,6 +465,16 @@ def do_set(args):
             f.pop("anchor_name", None)
     if args.anchor and not args.anchor_name and not f.get("anchor_name"):
         f["anchor_name"] = f"跟踪锚{args.anchor}"
+    if args.minute is not None:
+        if args.minute:
+            f["minute_tencent"] = norm_tencent_symbol(args.minute)
+            if args.minute_name:
+                f["minute_name"] = args.minute_name
+            elif not f.get("minute_name"):
+                f["minute_name"] = f"分时锚{f['minute_tencent']}"
+        else:
+            f.pop("minute_tencent", None)
+            f.pop("minute_name", None)
     save(cfg)
     print(f"已更新 {code}: {json.dumps(f, ensure_ascii=False)}")
 
@@ -520,10 +541,14 @@ if __name__ == "__main__":
     pa = sub.add_parser("add"); pa.add_argument("code"); pa.add_argument("--name"); pa.add_argument("--type", choices=["ETF", "MUTUAL"])
     pa.add_argument("--amount", type=float); pa.add_argument("--shares", type=float); pa.add_argument("--buy-nav", type=float)
     pa.add_argument("--anchor", help="估算锚腾讯代码, 如 sh000510(指数)/sh512890(ETF)"); pa.add_argument("--anchor-name")
+    pa.add_argument("--minute", help="分时锚腾讯代码(场内ETF/指数, 如 sh516670); 配置后卡片展示该标的当日分时")
+    pa.add_argument("--minute-name")
     pa.add_argument("--tags", help="分类标签, 逗号分隔, 如: 养老金专属,指数基金")
     ps = sub.add_parser("set"); ps.add_argument("code"); ps.add_argument("--name"); ps.add_argument("--type", choices=["ETF", "MUTUAL"])
     ps.add_argument("--amount", type=float); ps.add_argument("--shares", type=float); ps.add_argument("--buy-nav", type=float)
     ps.add_argument("--anchor", help="估算锚腾讯代码(传空串移除)"); ps.add_argument("--anchor-name")
+    ps.add_argument("--minute", help="分时锚腾讯代码(传空串移除; 未配置时场外基金兜底用估算锚)")
+    ps.add_argument("--minute-name")
     ps.add_argument("--tags", help="分类标签, 逗号分隔(传空串清空)")
     ps.add_argument("--buy-fee-rate", type=float, help="申购费率(小数, 如0.0012=0.12%)")
     ps.add_argument("--sell-fee-rate", type=float, help="赎回费率(小数, 默认0)")

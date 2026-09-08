@@ -92,6 +92,8 @@ for code, meta in (DATA.get("funds") or {}).items():
         "tags": meta.get("tags") or [],
         "anchor_tencent": (FUND_CFG.get(meta["fund_code"]) or {}).get("anchor_tencent") or "",
         "anchor_name": (FUND_CFG.get(meta["fund_code"]) or {}).get("anchor_name") or "",
+        "minute_tencent": (FUND_CFG.get(meta["fund_code"]) or {}).get("minute_tencent") or "",
+        "minute_name": (FUND_CFG.get(meta["fund_code"]) or {}).get("minute_name") or "",
         "buy_fee_rate": (FUND_CFG.get(meta["fund_code"]) or {}).get("buy_fee_rate") or 0,
         "sell_fee_rate": (FUND_CFG.get(meta["fund_code"]) or {}).get("sell_fee_rate") or 0,
         "quarter": meta["holdings_quarter"], "report_date": meta["holdings_report_date"],
@@ -229,6 +231,11 @@ function poll(){
         else { state.fail++; state.ok = false; if(state.fail === 1) setStatus("行情通道暂时不可用, 显示最近快照"); }
       });
     }
+  });
+  /* 锚定分时: 跟随轮询刷新(mtLoad 内部 60s TTL 节流; 折叠卡片由 drawMinute 自行跳过) */
+  Object.keys(CFG.funds).forEach(function(k){
+    var el = document.getElementById("minchart_" + k);
+    if(el && el.offsetParent !== null) drawMinute(k);
   });
 }
 
@@ -431,13 +438,30 @@ function cardHTML(f, key){
         : '';
       return '<li>' + kind + ' ' + h.name + ' <span class="d-code">' + h.code + '</span> 权重 <b>' + Number(h.weight).toFixed(2) + '%</b> ' + rtag + '</li>';
     }).join("");
-    directHTML = '<div class="direct"><div class="direct-title">当前基金直接持仓</div><ul class="direct-list">' + ditems + '</ul>' +
+    var dMore = direct.length > 5;
+    directHTML = '<div class="direct"><div class="direct-title">当前基金直接持仓</div>' +
+      '<ul class="direct-list' + (dMore ? " list5" : "") + '" id="dlist_' + key + '">' + ditems + '</ul>' +
+      (dMore ? '<button class="btn-x5" data-tgl="dlist_' + key + '" data-cls="list5" data-count="' + direct.length + '">展开全部(' + direct.length + ')</button>' : '') +
       (f.holdings_penetrated ? '<div class="direct-note">下方股票 = 穿透聚合后全部成分股权重（按持有比例折算，同股票经多路径持有则权重求和）</div>' : '') + '</div>';
   }
   var isIdx = f.type === "INDEX";
+  /* 场内分时: 显式分时锚 > 场外估算锚兜底 > ETF/LOF/指数自身代码(自动) */
+  var mtConf = mtSymOf(f, key);
+  var mtSym = mtConf ? mtConf.sym : "";
+  var mtLabel = mtConf ? mtConf.label : "";
+  var mtHTML = "";
+  if(mtSym){
+    var mtTitle = (mtConf.kind === "anchor") ? "锚定场内分时" : ((f.type === "INDEX") ? "指数分时" : "场内分时");
+    mtHTML = '<div class="mtsec" id="mtsec_' + key + '"><div class="mt-title"><span>' + mtTitle + '</span>' +
+      '<span class="mt-sym">' + mtLabel + ' (' + mtSym.slice(2) + ')</span>' +
+      '<span class="mt-meta" id="mtmeta_' + key + '"></span>' +
+      '<span class="mt-cfg" data-code="' + key + '" title="配置分时锚: 打开持仓管理并定位到该基金">⚙</span></div>' +
+      '<div id="minchart_' + key + '" class="minchart"></div></div>';
+  }
   var body = [
     '<div class="sub" id="sub_' + key + '">' + (isIdx ? '指数成分股实时行情 · 来源: 腾讯行情'
-      : ((f.official_snapshot_desc ? "快照参考: " + f.official_snapshot_desc + " · " : "") + "持仓披露 " + f.quarter + " (" + f.report_date + ")" + penSuffix(f))) + '</div>',
+      : ((f.official_snapshot_desc ? "快照参考: " + f.official_snapshot_desc + " · " : "") + "持仓披露 " + f.quarter + " (" + f.report_date + ")" + penSuffix(f)
+        + mtAddHTML(key))) + '</div>',
     (isIdx
       ? '<div class="base">成分股 ' + f.stocks.length + ' 只 · 涨跌幅实时(以昨收为锚) · 指数自身点位见卡片右上角</div>'
       : '<div class="base">基线(前一日收盘准确数据): ' + f.baseline_desc + '</div>'),
@@ -445,11 +469,13 @@ function cardHTML(f, key){
       ? '<div class="model"><span class="tag">指数实时涨跌</span> <span id="model_' + key + '">—</span></div>'
       : '<div class="model"><span class="tag">实时模型预估(持仓加权' + (f.coverage == null ? "—" : f.coverage) + '%)</span> <span id="model_' + key + '">—</span>' +
         (idx.name ? ' <span class="src">余量指数[' + idx.name + '] <span id="idx_' + key + '">—</span></span>' : '') + '</div>'),
+    mtHTML,
     posHTML(f, key),
     directHTML,
     (isIdx ? '' : '<div class="navsec"><div class="nav-tabs" id="navtabs_' + key + '">' + navTabs + '</div><div id="navchart_' + key + '" class="navchart"></div></div>'),
     (isIdx ? '' : '<div id="chart_' + key + '" class="chart"></div>'),
-    '<table class="tbl"><thead><tr><th>名称</th><th class="num">代码</th><th class="num">权重(聚合)</th><th class="num">主力净流入</th><th class="num">散户净流入</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">行情时间</th></tr></thead><tbody>' + rows + '</tbody></table>',
+    '<div id="holdwrap_' + key + '" class="' + (f.stocks.length > 5 ? "x5scroll" : "") + '"><table class="tbl"><thead><tr><th>名称</th><th class="num">代码</th><th class="num">权重(聚合)</th><th class="num">主力净流入</th><th class="num">散户净流入</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">行情时间</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    (f.stocks.length > 5 ? '<button class="btn-x5" data-tgl="holdwrap_' + key + '" data-cls="x5scroll" data-count="' + f.stocks.length + '">展开全部(' + f.stocks.length + ')</button>' : ''),
     '<div class="note">注: 价格/涨跌幅/行情时间为实时行情(以"昨收"为锚); 可在顶部选择 20s/60s 自动刷新, 或点"手动刷新"更新, 暂停则不再自动刷新。主力/散户净流入来自东财个股资金流, 为最近交易日累计值(盘前快照=前一日全天), 与当日盘中行情非同一口径, 仅作参考, 请勿与现价/涨跌幅直接对应。</div>'
   ].join("");
   var starOn = starOf(key);
@@ -473,6 +499,13 @@ function foldToggle(key){
     var ch = window["navchart_" + key];
     if(ch){ try{ ch.resize(); }catch(e){} }
     else { initNavChart(key, true); }
+    /* 锚定分时图: 展开后补画(折叠时容器不可见, drawMinute 会跳过)或 resize */
+    var mc = document.getElementById("minchart_" + key);
+    if(mc){
+      var mch = window["minchart_" + key];
+      if(mch){ try{ mch.resize(); }catch(e){} }
+      else { drawMinute(key); }
+    }
   }
   try { localStorage.setItem("fold_" + key, folded ? "0" : "1"); } catch(e) {}
 }
@@ -485,6 +518,256 @@ function restoreFold(key){
     if(body) body.style.display = "none";
     if(btn) btn.textContent = "展开";
   }
+}
+/* 分时标的解析(供卡片构建与 drawMinute 共用):
+   1) 显式配置 minute_tencent  2) 场外基金兜底用估算锚 anchor_tencent  3) ETF/LOF/指数自身代码(有真实场内分时, 无需配置) */
+function tencentSym(code){ return /^[569]/.test(code) ? "sh" + code : "sz" + code; }
+function fmtPx(v){ return v >= 100 ? v.toFixed(2) : v.toFixed(3); }
+function fmtHand(v){ return v >= 10000 ? (v / 10000).toFixed(1) + "万手" : Math.round(v) + "手"; }
+function fmtMoney(v){ return v >= 1e8 ? (v / 1e8).toFixed(2) + "亿" : (v >= 1e4 ? (v / 1e4).toFixed(1) + "万" : Math.round(v)); }
+function mtSymOf(f, key){
+  if(!f) return null;
+  if(f.minute_tencent && f.minute_tencent.length > 2)
+    return { sym: f.minute_tencent, label: f.minute_name || f.minute_tencent, kind: "explicit" };
+  if(f.type !== "ETF" && f.type !== "INDEX" && f.anchor_tencent && f.anchor_tencent.length > 2)
+    return { sym: f.anchor_tencent, label: f.anchor_name || f.anchor_tencent, kind: "anchor" };
+  /* ETF / LOF / 指数: 自身就是场内可交易标的, 自动关联自身当日分时 */
+  if((f.type === "ETF" || f.type === "INDEX") && /^\d{6}$/.test(key || ""))
+    return { sym: tencentSym(key), label: f.name || key, kind: "self" };
+  return null;
+}
+/* ---------------- 场内 ETF 当日分时(配置驱动) ----------------
+   场外基金无分时; 配置了分时锚(minute_tencent, 经 manage_funds.py --minute)则展示该场内标的分时,
+   未配置时兜底用估算锚(anchor_tencent, 如 sh516670); ETF/LOF/指数卡片自动用自身代码。
+   数据源: 腾讯 web.ifzq.gtimg.cn minute/query, 用 _var= 包装成 JS 赋值后经 loadScript 引入(与行情通道同思路, 无跨域问题)。
+   按 sym 缓存 60s(TTL), 多张卡共享同一标的时只拉一次; poll 轮询时顺带刷新(内部节流)。 */
+var MT_TTL = 60000;
+function mtLoad(sym, cb){
+  var now = Date.now();
+  var c = window["mtcache_" + sym];
+  if(c && (now - c.ts) < MT_TTL){ cb(c.data); return; }
+  var vn = "mtx_" + sym.replace(/[^a-z0-9]/gi, "") + "_" + (now % 1000000);
+  loadScript("https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=" + sym + "&_var=" + vn, "utf-8", function(){
+    var d = window[vn];
+    try { delete window[vn]; } catch(e){}
+    var out = null;
+    try {
+      var node = d && d.data && d.data[sym];
+      if(node && node.data && node.data.data && node.data.data.length){
+        var qt = (node.qt || {})[sym] || [];
+        /* qt[6]=当日累计总手 qt[7]=外盘(主动买累计手) qt[8]=内盘(主动卖累计手), 仅快照级可免费获取 */
+        var b = parseFloat(qt[7]), s = parseFloat(qt[8]);
+        out = { points: node.data.data, date: node.data.date || "",
+                prev: parseFloat(qt[4]), name: qt[1] || "",
+                buy: (isFinite(b) && b > 0) ? b : 0,
+                sell: (isFinite(s) && s > 0) ? s : 0 };
+      }
+    } catch(e){}
+    window["mtcache_" + sym] = { ts: now, data: out };
+    cb(out);
+  }, function(){
+    try { delete window[vn]; } catch(e){}
+    window["mtcache_" + sym] = { ts: now, data: null };
+    cb(null);
+  });
+}
+function drawMinute(key){
+  var f = CFG.funds[key];
+  if(!f) return;
+  var mc = mtSymOf(f, key);
+  if(!mc) return;
+  var sym = mc.sym;
+  if(!sym || sym.length < 3) return;
+  var el = document.getElementById("minchart_" + key);
+  if(!el) return;
+  if(el.offsetParent === null) return;   /* 卡片折叠中: 容器不可见, 展开时由 foldToggle 补画 */
+  var meta = document.getElementById("mtmeta_" + key);
+  mtLoad(sym, function(d){
+    if(!d){
+      if(meta) meta.textContent = "分时暂不可用";
+      el.innerHTML = '<div class="mt-fallback">分时暂不可用(非交易时段或接口异常)</div>';
+      try { if(window["minchart_" + key] && window["minchart_" + key].dispose) window["minchart_" + key].dispose(); } catch(e){}
+      window["minchart_" + key] = null;
+      return;
+    }
+    if(meta){
+      var ds = d.date ? d.date.slice(0, 4) + "-" + d.date.slice(4, 6) + "-" + d.date.slice(6, 8) : "";
+      if(d.prev) ds += " · 虚线=昨收 " + fmtPx(d.prev);   /* 昨收基准线数值: 图内标签不渲染, 改在图外标注 */
+      if(f.type !== "INDEX" && d.buy > 0) ds += " · 买盘 " + fmtHand(d.buy) + " / 卖盘 " + fmtHand(d.sell);
+      meta.textContent = ds;
+    }
+    var pts = d.points.map(function(s){
+      var p = s.split(" ");
+      return { t: p[0], price: parseFloat(p[1]), vol: parseFloat(p[2]), amt: parseFloat(p[3]) };
+    }).filter(function(x){ return x && !isNaN(x.price); });
+    if(!pts.length) return;
+    /* 滚动差分(近实时买卖): 腾讯只有"当前时刻"的外盘/内盘累计, 无历史分点序列, 无法回溯已过去分钟的
+       主动买卖; 改为每次轮询抓取后 本次累计-上次累计 得到区间内真实主动买/卖, 归属到最新分钟槽逐分钟累积。
+       仅页面开启期间持续有效; 跨 2+ 分钟才抓取一次时该区间买卖归入最新分钟(近似口径)。 */
+    var st = window["mtdiff_" + sym] || (window["mtdiff_" + sym] = { acc: {}, lastMin: "", buy: 0, sell: 0, ts: 0 });
+    var cur = pts[pts.length - 1];
+    if(cur && d.buy > 0 && st.lastMin && cur.t !== st.lastMin){
+      var dB = d.buy - st.buy, dS = d.sell - st.sell;
+      if(dB + dS > 0 && dB >= 0 && dS >= 0 && dB <= d.buy && dS <= d.sell){
+        st.acc[cur.t] = st.acc[cur.t] || { b: 0, s: 0 };
+        st.acc[cur.t].b += dB;
+        st.acc[cur.t].s += dS;
+      }
+    }
+    st.lastMin = cur.t; st.buy = d.buy; st.sell = d.sell; st.ts = Date.now();
+    var prev = d.prev || pts[0].price;
+    /* 完整交易时段槽位: 09:30-11:30(121点) + 13:01-15:00(120点) = 241点;
+       x 轴固定铺满全天, 未到的时段无数据 -> 线在此断开(空白), 收盘后 241 点全有 */
+    var slots = [];
+    (function(){
+      var h = 9, m = 30;
+      while(true){ slots.push((h < 10 ? "0" + h : h) + ":" + (m < 10 ? "0" + m : m)); if(h === 11 && m === 30) break; m++; if(m === 60){ m = 0; h++; } }
+      h = 13; m = 1;
+      while(true){ slots.push(h + ":" + (m < 10 ? "0" + m : m)); if(h === 15 && m === 0) break; m++; if(m === 60){ m = 0; h++; } }
+    })();
+    var byT = {};
+    pts.forEach(function(x){ byT[x.t] = x; });
+    var times = slots;
+    var prices = slots.map(function(s){ var x = byT[s.replace(":", "")]; return x ? x.price : null; });
+    /* 腾讯接口 vol/amt 为当日累计值(单位 手/元) -> 差分得"该分钟实际成交量/额"; 无数据槽为 null */
+    var mVols = [], mAmts = [], cVol = 0, cAmt = 0, maxVol = 0;
+    slots.forEach(function(s){
+      var x = byT[s.replace(":", "")];
+      if(x && !isNaN(x.vol)){
+        var dv = x.vol - cVol, da = x.amt - cAmt;
+        cVol = x.vol; cAmt = x.amt;
+        if(dv < 0) dv = 0; if(da < 0) da = 0;
+        mVols.push(dv); mAmts.push(da); if(dv > maxVol) maxVol = dv;
+      } else { mVols.push(null); mAmts.push(null); }
+    });
+    var valid = prices.filter(function(v){ return v != null; });
+    var lo = Math.min.apply(null, valid.concat([prev]));
+    var hi = Math.max.apply(null, valid.concat([prev]));
+    var pad = (hi - lo) * 0.15 || (hi || 1) * 0.002;
+    var lmin = lo - pad, lmax = hi + pad;
+    var rmin = prev ? (lmin - prev) / prev * 100 : 0;
+    var rmax = prev ? (lmax - prev) / prev * 100 : 0;
+    var chart = window["minchart_" + key];
+    if(!chart || typeof chart.setOption !== "function"){
+      try { if(chart && chart.dispose) chart.dispose(); } catch(e){}
+      el.innerHTML = "";
+      try { chart = echarts.init(el); } catch(e2){ return; }
+      window["minchart_" + key] = chart;
+    }
+    try {
+      var showVol = f.type !== "INDEX";   /* 指数点位无成交量柱 */
+      var volCols = { up: "#e23c39", dn: "#16a34a" };
+      /* 底部量柱: 有真实滚动差分买卖的分钟 -> 买红/卖绿两段堆叠; 其余分钟 -> 单段按分钟涨跌着色(总成交代理) */
+      var acc = st.acc || {};
+      var buyBars = [], sellBars = [], stackMax = 0;
+      mVols.forEach(function(dv, i){
+        if(dv == null){ buyBars.push({ value: null }); sellBars.push({ value: null }); return; }
+        var rec = acc[times[i].replace(":", "")];
+        if(rec && (rec.b + rec.s) > 0){
+          buyBars.push({ value: rec.b, itemStyle: { color: volCols.up } });
+          sellBars.push({ value: rec.s, itemStyle: { color: volCols.dn } });
+          if(rec.b + rec.s > stackMax) stackMax = rec.b + rec.s;
+        } else {
+          var p = prices[i];
+          var ref = (i > 0 && prices[i - 1] != null) ? prices[i - 1] : prev;   /* 与该分钟前一分钟比: 红涨绿跌 */
+          var col = (p == null || p === ref) ? "#9ca3af" : (p > ref ? volCols.up : volCols.dn);
+          buyBars.push({ value: dv, itemStyle: { color: col } });
+          sellBars.push({ value: null });
+          if(dv > stackMax) stackMax = dv;
+        }
+      });
+      var xLbl = { color: "#9ca3af", fontSize: 10,
+        interval: function(i, v){ return ["09:30", "10:30", "11:30", "13:30", "14:30", "15:00"].indexOf(v) >= 0; } };
+      var lblBox = { show: true, backgroundColor: "rgba(255,255,255,0.95)", color: "#374151",
+                     fontSize: 10, padding: [2, 5], borderColor: "#e5e7eb", borderWidth: 1, borderRadius: 3 };
+      var x0 = { type: "category", data: times, boundaryGap: false,
+        axisLine: showVol ? { show: false } : { lineStyle: { color: "#e5e7eb" } },
+        axisTick: { show: false },
+        axisLabel: showVol ? { show: false } : xLbl,
+        axisPointer: showVol ? { label: { show: false } } : { label: lblBox } };
+      var opt = {
+        grid: showVol
+          /* 上(价格)/下(量)两区必须共享同一绘图区宽度: containLabel 各自推算会把两区
+             左右起点算得不同, 导致底部量柱与价格时间轴错位。改为固定相同的 left/right 像素。 */
+          ? [{ left: 54, right: 46, top: 12, height: "54%", containLabel: false },
+             { left: 54, right: 46, top: "72%", height: "16%", containLabel: false }]
+          : { left: 6, right: 6, top: 10, bottom: 4, containLabel: true },
+        tooltip: { trigger: "axis",
+          axisPointer: { type: "cross", snap: false,
+            /* link: 跨两区 x 轴联动——hover 价格区或量区, 另一区同刻竖线同步出现, 上下严格对应 */
+            link: [{ xAxisIndex: "all" }],
+            lineStyle: { color: "#c0c4cc", width: 1, type: [4, 3] },
+            crossStyle: { color: "#c0c4cc", width: 1, type: [4, 3] },
+            label: lblBox },
+          formatter: function(ps){
+            var p = ps[0]; if(!p) return "";
+            var t = times[p.dataIndex] || "", i = p.dataIndex;
+            var x = byT[t.replace(":", "")];
+            if(!x) return t + "<br/>暂无数据";
+            var pct = prev ? (x.price - prev) / prev * 100 : 0;
+            var s = t + "<br/>价格: " + fmtPx(x.price) +
+              "<br/>较昨收: " + (pct > 0 ? "+" : "") + pct.toFixed(2) + "%";
+            if(showVol && mVols[i] != null){
+              s += "<br/>分时量: " + fmtHand(mVols[i]) + " · 额: " + fmtMoney(mAmts[i]);
+              var rec = acc[times[i].replace(":", "")];
+              if(rec && (rec.b + rec.s) > 0)
+                s += "<br/>主动买: " + fmtHand(rec.b) + " / 主动卖: " + fmtHand(rec.s) + " (近实时差分)";
+            }
+            return s;
+          } },
+        xAxis: showVol
+          ? [ x0, { type: "category", gridIndex: 1, data: times, boundaryGap: false,
+              axisLabel: xLbl, axisLine: { lineStyle: { color: "#e5e7eb" } },
+              axisTick: { show: false }, axisPointer: { label: lblBox } } ]
+          : [ x0 ],
+        yAxis: [
+          { type: "value", gridIndex: 0, min: lmin, max: lmax, splitNumber: 7,
+            /* splitNumber: 轴范围收窄(今日振幅小时)默认5等分会把刻度拉成 0.640/0.6425/0.645 之类,
+               昨收(如0.642)卡在两刻度之间易误读为线偏位; 7等分使 interval nice 到 0.002, 昨收恰好落在刻度上 */
+            axisLabel: { color: "#6b7280", fontSize: 10,
+              formatter: function(v){ return fmtPx(Number(v)); } },  /* 分时价格三位(fmtPx: ≥100 两位适配指数点位), 避免首尾浮点长尾 */
+            splitLine: { lineStyle: { color: "#eef0f3" } },
+            axisPointer: { label: { show: true,
+              formatter: function(p){ return "价格 " + fmtPx(Number(p.value)); } } } },
+          { type: "value", gridIndex: 0, min: rmin, max: rmax, position: "right",
+            axisLabel: { fontSize: 10,
+              formatter: function(v){ var c = v >= 0 ? "r" : "g"; return "{" + c + "|" + (v > 0 ? "+" : "") + v.toFixed(1) + "%}"; },
+              rich: { r: { color: "#e23c39" }, g: { color: "#16a34a" } } },
+            axisPointer: { label: { show: true,
+              formatter: function(p){ var v = Number(p.value); return (v > 0 ? "+" : "") + v.toFixed(2) + "%"; } } },
+            axisLine: { show: false }, splitLine: { show: false }, axisTick: { show: false } },
+          (showVol
+            ? { type: "value", gridIndex: 1, min: 0, max: (stackMax * 1.12 || 1),
+                axisLabel: { color: "#9ca3af", fontSize: 9,
+                  formatter: function(v){ return v >= 1e4 ? (v / 1e4).toFixed(0) + "万" : (v >= 1000 ? (v / 1000).toFixed(0) + "k" : v); } },
+                splitNumber: 2, splitLine: { lineStyle: { color: "#f3f4f6" } },
+                axisPointer: { show: false } }
+            : null)
+        ].filter(Boolean),
+        series: [
+          { type: "line", xAxisIndex: 0, yAxisIndex: 0, data: prices, symbol: "none", z: 1,
+            lineStyle: { color: "#185FA5", width: 1.5 },
+            areaStyle: { color: "rgba(24,95,165,0.07)" } },
+          /* 昨收参考线(0%基准): 不能用 markLine —— ECharts 5.5 在本配置(显式 min/max + 未指定 interval)
+             下会把 markLine 的 yAxis 值画到"向下偏移一个 tick"的位置(实测 yAxis:0.642 画到 0.640 处),
+             表现为"昨收线不在 0%"; 改用常数 line series, 与价格曲线共用同一坐标映射, 定位精确。
+             标签用 endLabel + offset 回移到绘图区内(线末端上方), 避免超出 grid 右边界被裁。 */
+          { type: "line", xAxisIndex: 0, yAxisIndex: 0, symbol: "none", z: 0,
+            data: times.map(function(){ return prev; }),
+            silent: true, animation: false,
+            lineStyle: { color: "#9ca3af", type: "dashed", width: 1 } },
+          /* 注: 标签不放图内 —— 该图上 series label / endLabel 均不渲染(已实测), 说明文字改到图外 meta 行 */
+          (showVol
+            ? { type: "bar", xAxisIndex: 1, yAxisIndex: 2, stack: "mt", data: buyBars, barWidth: "58%", z: 2, animation: false }
+            : null),
+          (showVol
+            ? { type: "bar", xAxisIndex: 1, yAxisIndex: 2, stack: "mt", data: sellBars, barWidth: "58%", z: 2, animation: false }
+            : null)
+        ].filter(Boolean)
+      };
+      chart.setOption(opt, true);
+    } catch(e) {}
+  });
 }
 /* 历史净值曲线: 范围切换 近1月/近3月/近6月/近1年/今年以来/近2年/近3年/近5年/成立以来
    数据来源: 页面打开时通过 /api/navs/<code> 从数据库异步拉取, 缓存在 window["navdata_"+key] */
@@ -582,12 +865,72 @@ function drawNav(key, range){
   var pad = (vmax - vmin) * 0.12;
   if(!(pad > 0)) pad = (vmax || 1) * 0.04;
   var lmin = vmin - pad, lmax = vmax + pad;
+  /* ---- 横向参考线 ----
+     1) 持仓成本线: 移动加权平均成本净值(有持仓时绘制, 标注当前净值相对成本的盈亏%)
+     2) 区间最高/最低线: 所选区间净值上/下边界
+     3) 鼠标悬浮十字线: 水平指示线随鼠标移动, 便于横向比对任意位置净值
+     成本线可能远离区间(如近1月大涨后成本远低于区间), 此时最多向外扩 1.5 倍区间宽,
+     仍超出则改为左上角文字提示, 避免把净值曲线压扁成一条直线。 */
+  var _pos = (CFG.funds[key] && CFG.funds[key].position) || {};
+  var _costNav = null;
+  if(_pos.configured && (Number(_pos.shares) > 0 || Number(_pos.shares_derived) > 0)){
+    if(_pos.avg_cost_nav != null && Number(_pos.avg_cost_nav) > 0) _costNav = Number(_pos.avg_cost_nav);
+    else {
+      var _sh = Number(_pos.shares_derived || _pos.shares || 0);   /* 手动配置口径: 买入金额/份额 兜底 */
+      if(_sh > 0 && Number(_pos.buy_amount) > 0) _costNav = Number(_pos.buy_amount) / _sh;
+    }
+  }
+  var _vLast = vals.length ? vals[vals.length - 1] : null;
+  var _costOut = 0;
+  if(_costNav != null && _nn.length){
+    var _span = (vmax - vmin) || ((vmax || 1) * 0.02);
+    var _lim = _span * 1.5;
+    if(_costNav > lmax) lmax = Math.min(_costNav + _span * 0.05, lmax + _lim);
+    else if(_costNav < lmin) lmin = Math.max(_costNav - _span * 0.05, lmin - _lim);
+    if(_costNav > lmax) _costOut = 1; else if(_costNav < lmin) _costOut = -1;
+  }
+  var _pctVsCost = function(c){ return (_vLast != null && _vLast > 0 && c > 0) ? (_vLast - c) / c * 100 : null; };
+  var _mk = [];   /* markLine 数据: 成本线 + 区间高低线 */
+  if(_costNav != null && _costOut === 0 && _nn.length){
+    var _cg = _pctVsCost(_costNav);
+    _mk.push({ yAxis: _costNav,
+      lineStyle: { color: "#d97706", type: "dashed", width: 1.2 },
+      label: { show: true, position: "insideStartTop",
+        formatter: "成本 " + _costNav.toFixed(4) + (_cg == null ? "" : " · " + (_cg > 0 ? "+" : "") + _cg.toFixed(2) + "%"),
+        color: _cg == null ? "#d97706" : (_cg >= 0 ? "#e23c39" : "#16a34a"),
+        fontSize: 10, backgroundColor: "rgba(255,255,255,0.82)", padding: [2, 3], borderRadius: 2 } });
+  }
+  if(_nn.length > 1){
+    _mk.push({ yAxis: vmax, lineStyle: { color: "#e23c39", type: "dotted", width: 1 },
+      label: { show: true, position: "insideEndTop", formatter: "高 " + vmax.toFixed(4),
+        color: "#e23c39", fontSize: 10, backgroundColor: "rgba(255,255,255,0.82)", padding: [2, 3], borderRadius: 2 } });
+    _mk.push({ yAxis: vmin, lineStyle: { color: "#16a34a", type: "dotted", width: 1 },
+      label: { show: true, position: "insideEndBottom", formatter: "低 " + vmin.toFixed(4),
+        color: "#16a34a", fontSize: 10, backgroundColor: "rgba(255,255,255,0.82)", padding: [2, 3], borderRadius: 2 } });
+  }
+  var _gp = [];   /* 成本线远离区间时 -> 左上角文字提示(不画被裁剪的线) */
+  if(_costNav != null && _costOut !== 0){
+    var _cg2 = _pctVsCost(_costNav);
+    _gp.push({ type: "text", left: 12, top: 8, z: 30, silent: true,
+      style: { text: "成本 " + _costNav.toFixed(4) + (_cg2 == null ? "" : " (" + (_cg2 > 0 ? "+" : "") + _cg2.toFixed(2) + "%)")
+        + " 在区间" + (_costOut > 0 ? "上方" : "下方"),
+        fill: "#6b7280", fontSize: 10, backgroundColor: "rgba(255,255,255,0.9)", padding: [2, 4], borderRadius: 2 } });
+  }
   var rmin = v0 ? (lmin - v0) / v0 * 100 : 0;
   var rmax = v0 ? (lmax - v0) / v0 * 100 : 0;
   try {
     chart.setOption({
     grid: { left: 8, right: 54, top: 12, bottom: 26, containLabel: true },
+    graphic: _gp,   /* 成本线远离区间时的角标提示(空数组=清除旧提示) */
     tooltip: { trigger: "axis",
+      /* cross: 竖向日期线 + 水平净值线随鼠标移动; snap=false 使横线自由跟手,
+         左/右 Y 轴端动态显示该高度对应的 净值 / 百分比(见各轴 axisPointer.label) */
+      axisPointer: { type: "cross", snap: false,
+        lineStyle: { color: "#c0c4cc", width: 1, type: [4, 3] },
+        crossStyle: { color: "#c0c4cc", width: 1, type: [4, 3] },
+        label: { show: true,
+          backgroundColor: "rgba(255,255,255,0.95)", color: "#374151", fontSize: 10,
+          padding: [2, 5], borderColor: "#e5e7eb", borderWidth: 1, borderRadius: 3 } },
       formatter: function(ps){
         var p = ps[0];
         if(!p) return "";
@@ -601,8 +944,19 @@ function drawNav(key, range){
       } },
     xAxis: { type: "category", data: dates, boundaryGap: false, axisLabel: { color: "#9ca3af", fontSize: 10 }, axisLine: { lineStyle: { color: "#e5e7eb" } } },
     yAxis: [
-      { type: "value", min: lmin, max: lmax, axisLabel: { color: "#6b7280", fontSize: 10 }, splitLine: { lineStyle: { color: "#eef0f3" } } },
+      { type: "value", min: lmin, max: lmax,
+        axisLabel: { color: "#6b7280", fontSize: 10,
+          formatter: function(v){ return Number(v).toFixed(2); } },  /* 净值刻度两位, 避免首尾浮点长尾 */
+        splitLine: { lineStyle: { color: "#eef0f3" } },
+        /* 十字横线左端: 动态显示该高度的净值(与左轴同刻度) */
+        axisPointer: { label: { show: true,
+          formatter: function(p){ return "净值 " + Number(p.value).toFixed(4); } } } },
       { type: "value", min: rmin, max: rmax, position: "right",
+        axisPointer: { label: { show: true,
+          formatter: function(p){
+            var v = Number(p.value);
+            return (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+          } } },
         axisLabel: { fontSize: 10,
           formatter: function(v){ var c = v >= 0 ? "r" : "g"; return "{" + c + "|" + (v > 0 ? "+" : "") + v.toFixed(1) + "%}"; },
           rich: { r: { color: "#e23c39" }, g: { color: "#16a34a" } } },
@@ -616,7 +970,9 @@ function drawNav(key, range){
     series: [
       { type: "line", data: alignedVals, symbol: "none", sampling: "lttb", z: 1,
         lineStyle: { color: "#185FA5", width: 2 },
-        areaStyle: { color: "rgba(24,95,165,0.08)" } },
+        areaStyle: { color: "rgba(24,95,165,0.08)" },
+        markLine: { silent: true, animation: false, symbol: ["none", "none"],
+          label: { position: "insideEndTop" }, data: _mk } },
       { name: "买入", type: "scatter", data: buys, z: 10,
         symbol: "circle", symbolSize: 9,
         itemStyle: { color: UP, borderColor: "#fff", borderWidth: 1.5 },
@@ -840,7 +1196,7 @@ function applyQuotes(q){
       else { big = histChg; badge = '<span class="hb-badge">非实时·最近官方净值 ' + (hist.date || "") + ' ' + (histChg == null ? "—" : sv(histChg) + "%") + '</span>'; }
       document.getElementById("chg_" + key).textContent = (big == null ? "—" : sv(big) + "%");
       document.getElementById("chg_" + key).style.color = col(big);
-      document.getElementById("sub_" + key).innerHTML = badge + ' · 持仓披露 ' + f.quarter + " (" + f.report_date + ") · 快照参考 " + f.official_snapshot_desc + penSuffix(f);
+      document.getElementById("sub_" + key).innerHTML = badge + ' · 持仓披露 ' + f.quarter + " (" + f.report_date + ") · 快照参考 " + f.official_snapshot_desc + penSuffix(f) + mtAddHTML(key);
     } else {
       var anc = f.anchor_tencent ? q[f.anchor_tencent] : null;
       if(anc && anc.chg != null){
@@ -855,7 +1211,7 @@ function applyQuotes(q){
       }
       document.getElementById("chg_" + key).textContent = (big == null ? "—" : sv(big) + "%");
       document.getElementById("chg_" + key).style.color = col(big);
-      document.getElementById("sub_" + key).innerHTML = badge + ' · 持仓披露 ' + f.quarter + " (" + f.report_date + ") · 快照参考 " + f.official_snapshot_desc + penSuffix(f);
+      document.getElementById("sub_" + key).innerHTML = badge + ' · 持仓披露 ' + f.quarter + " (" + f.report_date + ") · 快照参考 " + f.official_snapshot_desc + penSuffix(f) + mtAddHTML(key);
     }
     document.getElementById("model_" + key).textContent = (model == null ? "—" : sv(model) + "%") + (adjusted != null ? " (修正 " + sv(adjusted) + "%)" : "");
     document.getElementById("model_" + key).style.color = col(adjusted != null ? adjusted : model);
@@ -918,7 +1274,7 @@ function initCharts(){
       });
     } catch(e) { /* ECharts 加载失败仅影响图表, 不影响实时数字刷新 */ }
   });
-  window.addEventListener("resize", function(){ Object.keys(window).forEach(function(k){ if((k.indexOf("chart_") === 0 || k.indexOf("navchart_") === 0) && window[k].resize) window[k].resize(); }); });
+  window.addEventListener("resize", function(){ Object.keys(window).forEach(function(k){ if((k.indexOf("chart_") === 0 || k.indexOf("navchart_") === 0 || k.indexOf("minchart_") === 0) && window[k] && window[k].resize) window[k].resize(); }); });
 }
 function corrHTML(){
   var list = CFG.corrections || [];
@@ -1069,6 +1425,13 @@ function clearBtnBusy(btn, origText){
   btn.innerHTML = (origText !== undefined) ? origText : (btn._busyOrig !== undefined ? btn._busyOrig : btn.innerHTML);
   delete btn._busyOrig;
 }
+/* 场外基金无任何分时标的(无分时锚/估算锚)时, 在 sub 行追加"⚙ 分时"配置入口; 轮询重写 sub 时需重复拼接 */
+function mtAddHTML(key){
+  var f = CFG.funds[key];
+  if(!f || f.type === "ETF" || f.type === "INDEX") return "";
+  if((f.minute_tencent && f.minute_tencent.length > 2) || (f.anchor_tencent && f.anchor_tencent.length > 2)) return "";
+  return '<span class="mt-add" data-code="' + key + '" title="为该基金配置场内分时锚(ETF/指数), 配置后展示当日分钟走势">⚙ 分时</span>';
+}
 function mgrRow(code, name, pos){
   var b = [];
   b.push('<div class="mg-row" data-code="', code, '" draggable="true">');
@@ -1076,6 +1439,8 @@ function mgrRow(code, name, pos){
   b.push('<span class="mg-name">', name, ' <span class="src">', code, '</span></span>');
   b.push('<input class="mg-in mg-tags" data-f="tags" placeholder="分类(逗号分隔, 如: 养老金专属,指数基金)" value="', (pos.tags || []).join(","), '" style="flex:1;min-width:160px">');
   b.push('<input class="mg-in" data-f="buy_fee_rate" title="申购费率(百分比, 如0.12=0.12%)" placeholder="申购费率%" value="', (pos.buy_fee_rate ? pos.buy_fee_rate * 100 : ""), '" style="width:66px">');
+  b.push('<input class="mg-in mg-minute" data-f="minute" title="分时锚: 场内ETF/指数腾讯代码(如 sh512170 或纯数字 512170, 留空=移除); 配置后卡片展示该标的当日分时, 未配置时兜底用估算锚" placeholder="分时锚(如sh512170)" value="', (pos.minute_tencent || ""), '" style="width:118px">');
+  b.push('<input class="mg-in" data-f="minute_name" title="分时锚显示名称(留空则输入代码后自动识别)" placeholder="分时锚名称" value="', (pos.minute_name || ""), '" style="width:92px">');
   b.push('<label class="mg-est-wrap" title="开启后记录该基金每日\'模型预估 vs 官方实际\'修正(默认关闭; 关闭则不生成、不显示)">预估修正'
          + '<input type="checkbox" class="mg-est" ', (pos.est_correction ? "checked" : ""), '></label>');
   b.push('<button class="btn mg-save">保存</button>');
@@ -1156,16 +1521,43 @@ function mgrInit(){
         var code = row.getAttribute("data-code");
         var payload = { code: code };
         row.querySelectorAll(".mg-in").forEach(function(inp){ payload[inp.getAttribute("data-f")] = inp.value; });
+        /* 分时锚变化时需整页刷新: 新增/移除 .mtsec 区块由服务端生成卡片HTML, 局部刷新覆盖不到 */
+        var prevMt = String((CFG.funds[code] && CFG.funds[code].minute_tencent) || "").toLowerCase();
+        var newMt = String(payload.minute || "").trim().toLowerCase();
+        if(/^\d{6}$/.test(newMt)) newMt = (newMt[0].match(/[569]/) ? "sh" : "sz") + newMt;
+        var mtChanged = newMt !== prevMt;
         setBtnBusy(btn, "保存中…");
         apiPost("/api/funds/save", payload, function(err, j){
           if(j && j.ok){
-            msg.textContent = "已保存 ✓ 持仓已局部刷新";
             clearBtnBusy(btn, "保存");
-            // 后端已秒级重建看板; 此处仅局部同步该卡片数值, 不整页重载
-            setTimeout(function(){ refreshTradeFund(code); }, 300);
+            if(mtChanged){
+              msg.textContent = "已保存 ✓ 分时锚已更新, 正在刷新页面…";
+              setTimeout(function(){ location.reload(); }, 900);
+            } else {
+              msg.textContent = "已保存 ✓ 持仓已局部刷新";
+              // 后端已秒级重建看板; 此处仅局部同步该卡片数值, 不整页重载
+              setTimeout(function(){ refreshTradeFund(code); }, 300);
+            }
           } else {
             msg.textContent = "保存失败: " + ((j && j.message) || err);
             clearBtnBusy(btn, "保存");
+          }
+        });
+      });
+    });
+    /* 分时锚输入失焦: 自动识别标的名称填入"分时锚名称"(留空时) */
+    box.querySelectorAll('.mg-in[data-f="minute"]').forEach(function(inp){
+      if(inp._mtBind) return; inp._mtBind = true;
+      inp.addEventListener("blur", function(){
+        var v = (inp.value || "").trim().toLowerCase();
+        if(!v) return;
+        if(/^\d{6}$/.test(v)) v = (v[0].match(/[569]/) ? "sh" : "sz") + v;
+        if(!/^(sh|sz)\d{6}$/.test(v)) return;
+        mtLoad(v, function(d){
+          if(d && d.name){
+            var r = inp.closest(".mg-row");
+            var nin = r && r.querySelector('.mg-in[data-f="minute_name"]');
+            if(nin && !nin.value.trim()) nin.value = d.name;
           }
         });
       });
@@ -1362,6 +1754,56 @@ function refreshCardValues(code){
     }
   }
 }
+/* ---- ② 交易记录: "持仓"过滤 + 记录表默认限高(前5条, 其余滚动) ---- */
+var TR_MAX_ROWS = 5;       /* 每只基金的记录表默认仅露出最新5条, 其余在滚动区内 */
+var TR_HOLD_ONLY = false;  /* true=仅显示持仓中(剩余份额>0)的基金, 其余整组隐藏 */
+function fundHeld(code){
+  var p = (CFG.funds[code] && CFG.funds[code].position) || {};
+  return Number(p.shares || 0) > 0;
+}
+/* 滚动区限高: 高度正好 = 表头 + 前 TR_MAX_ROWS 行(第6行起滚动可见)。
+   元素隐藏(display:none)时测不到高度 -> 仅清空 maxHeight、保留 capped,
+   待展开(tr-fold/tr-gfold/全部展开/持仓过滤)后再重新测量。 */
+function trCapFit(el){
+  if(!el) return;
+  var rows = el.querySelectorAll("tbody tr");
+  if(!rows || rows.length <= TR_MAX_ROWS){ el.classList.remove("capped"); el.style.maxHeight = ""; return; }
+  var tbl = el.querySelector("table");
+  var r6 = rows[TR_MAX_ROWS];
+  if(!tbl || !r6) return;
+  var h = r6.getBoundingClientRect().top - tbl.getBoundingClientRect().top - 1;
+  if(isFinite(h) && h > 50){ el.style.maxHeight = Math.floor(h) + "px"; }
+  else { el.style.maxHeight = ""; }
+}
+/* 持仓过滤: 隐藏非持仓基金整组; 全被隐藏时给出一条提示 */
+function applyTrHoldFilter(){
+  var list = document.getElementById("tr-list");
+  if(!list) return;
+  var shown = 0;
+  list.querySelectorAll(".tr-group").forEach(function(g){
+    var code = g.getAttribute("data-code");
+    var hide = TR_HOLD_ONLY && !fundHeld(code);
+    g.style.display = hide ? "none" : "";
+    if(!hide){
+      shown++;
+      /* 重新可见后补测量限高(隐藏时测不到高度) */
+      var w = g.querySelector(".tr-scroll.capped");
+      if(w) trCapFit(w);
+    }
+  });
+  var hint = list.querySelector(".tr-filter-empty");
+  if(TR_HOLD_ONLY && shown === 0 && Object.keys(CFG.funds).length){
+    if(!hint){
+      hint = document.createElement("div");
+      hint.className = "corr-empty tr-filter-empty";
+      hint.style.cssText = "margin:6px 0 2px";
+      list.appendChild(hint);
+    }
+    hint.textContent = "当前没有持仓中的基金 — 点击「全部」可查看全部基金";
+  } else if(hint){
+    hint.parentNode.removeChild(hint);
+  }
+}
 function renderTrList(){
   var box = document.getElementById("tr-list");
   if(!box) return;
@@ -1405,8 +1847,15 @@ function renderTrList(){
       Number(sum.buy_shares || 0).toLocaleString() + '份 · 累计卖出 ' + money(sum.sell_amount) + ' / ' +
       Number(sum.sell_shares || 0).toLocaleString() + '份' +
       (sum.dividend_amount ? ' · <b style="color:#b45309">累计分红 ' + money(sum.dividend_amount) + '</b>' : '') + '</div>';
+    /* 记录表默认限高: 交易>5笔时仅露出最新5条(其余在滚动区内查看), 可点「全部展示」解除限高看全部(状态记忆在本浏览器) */
+    var allMode = "0";
+    try { allMode = localStorage.getItem("trall_" + code) || "0"; } catch(e) {}
+    if(trades.length <= TR_MAX_ROWS) allMode = "1";
+    var capped = (trades.length > TR_MAX_ROWS) && allMode !== "1";
+    var capBar = trades.length > TR_MAX_ROWS
+      ? '<div class="tr-capbar"><button class="btn tr-cap" data-code="' + code + '" title="默认仅展示最新 ' + TR_MAX_ROWS + ' 条, 其余在框内滚动查看">' + (capped ? "全部展示" : "收起") + '</button></div>' : "";
     var listHtml = trades.length
-      ? holdBlock + aggLine + '<table class="tbl"><thead><tr><th>类型</th><th class="num">日期</th><th class="num">净值</th><th class="num">份额</th><th class="num">金额</th><th class="num">手续费</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+      ? holdBlock + aggLine + capBar + '<div class="tr-scroll' + (capped ? " capped" : "") + '"><table class="tbl"><thead><tr><th>类型</th><th class="num">日期</th><th class="num">净值</th><th class="num">份额</th><th class="num">金额</th><th class="num">手续费</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
       : holdBlock + aggLine + '<div class="corr-empty" style="margin:4px 0 2px">暂无交易记录 — 在上方添加买入/卖出/分红 (持仓金额将按记录自动计算)</div>';
     return '<div class="tr-group" data-code="' + code + '">' +
       '<div class="tr-group-head">' +
@@ -1430,6 +1879,27 @@ function renderTrList(){
       '</div></div>';
   }).join("");
   box.innerHTML = html;
+  /* 交易>5笔: 滚动区限高到恰好显示表头+前5行(第6行起滚动可见) */
+  box.querySelectorAll(".tr-scroll.capped").forEach(trCapFit);
+  /* 「全部展示 / 收起」: 切换该基金记录表的限高状态(记忆在本浏览器) */
+  box.querySelectorAll(".tr-cap").forEach(function(b){
+    if(b._b) return; b._b = true;
+    b.addEventListener("click", function(){
+      var code = b.getAttribute("data-code");
+      var wrap = b.closest(".tr-group").querySelector(".tr-scroll");
+      var cur = "0";
+      try { cur = localStorage.getItem("trall_" + code) || "0"; } catch(e) {}
+      var next = cur === "1" ? "0" : "1";
+      try { localStorage.setItem("trall_" + code, next); } catch(e) {}
+      if(next === "1"){
+        if(wrap){ wrap.classList.remove("capped"); wrap.style.maxHeight = ""; }
+        b.textContent = "收起";
+      } else {
+        if(wrap){ wrap.classList.add("capped"); trCapFit(wrap); }
+        b.textContent = "全部展示";
+      }
+    });
+  });
   /* 基金级折叠: 收起/展开整只基金(含添加行与记录) */
   box.querySelectorAll(".tr-gfold").forEach(function(b){
     if(b._b) return; b._b = true;
@@ -1439,6 +1909,8 @@ function renderTrList(){
       var folded = bodyEl.style.display === "none";
       bodyEl.style.display = folded ? "" : "none";
       b.textContent = folded ? "收起基金" : "展开基金";
+      /* 展开后记录区可见, 重新测量限高(此前隐藏时测不到) */
+      if(folded) bodyEl.querySelectorAll(".tr-scroll.capped").forEach(trCapFit);
       try { localStorage.setItem("trgfold_" + code, folded ? "0" : "1"); } catch(e) {}
     });
   });
@@ -1451,6 +1923,8 @@ function renderTrList(){
       var folded = recEl.style.display === "none";
       recEl.style.display = folded ? "" : "none";
       b.textContent = folded ? "收起记录" : "展开记录";
+      /* 展开后表格可见, 重新测量限高 */
+      if(folded){ var w = recEl.querySelector(".tr-scroll.capped"); if(w) trCapFit(w); }
       try { localStorage.setItem("trfold_" + code, folded ? "0" : "1"); } catch(e) {}
     });
   });
@@ -1676,13 +2150,16 @@ function renderTrList(){
       }
     });
   });
+  /* 持仓过滤: 若处于"持仓"模式, 重绘后重新隐藏非持仓基金整组 */
+  applyTrHoldFilter();
 }
 function mgrAdd(){
   var msg = document.getElementById("mgr-msg");
   var payload = {
     code: (document.getElementById("mg-code").value || "").trim(),
     name: (document.getElementById("mg-name").value || "").trim(),
-    anchor: (document.getElementById("mg-anchor").value || "").trim()
+    anchor: (document.getElementById("mg-anchor").value || "").trim(),
+    minute: (document.getElementById("mg-minute").value || "").trim()
   };
   var btn = document.getElementById("mg-add-btn");
   if(!payload.code){ msg.textContent = "请输入基金编码(6位, 如 022982)"; return; }
@@ -1709,6 +2186,30 @@ function mgrToggle(){
     m.style.display = "none";
     if(mgrDirty){ mgrDirty = false; location.reload(); }
   }
+}
+/* 卡片分时配置入口(⚙ / ⚙分时): 打开持仓管理面板, 展开基金管理, 定位到该基金的分时锚输入框 */
+function openMinuteCfg(key){
+  var m = document.getElementById("mgr");
+  if(!m) return;
+  if(m.style.display === "none"){ m.style.display = "block"; mgrInit(); }
+  try { localStorage.setItem("mgfold", "0"); } catch(e){}   /* 预置展开状态: mgrInit 渲染完成后按此展开 */
+  var tries = 0;
+  (function locate(){
+    tries++;
+    var body = document.getElementById("mgr-body");
+    var fb = document.getElementById("mg-fold");
+    var row = document.querySelector('.mg-row[data-code="' + key + '"]');
+    if((!body || body.style.display === "none") && body){
+      body.style.display = "";
+      if(fb) fb.textContent = "收起";
+    }
+    if(!row && tries < 10){ setTimeout(locate, 400); return; }   /* 行由 mgrInit 异步渲染, 重试等待 */
+    if(row){
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      var inp = row.querySelector('.mg-in[data-f="minute"]');
+      if(inp){ try { inp.focus(); inp.select(); } catch(e){} }
+    }
+  })();
 }
 /* 打开页面即同步: 每日只自动执行一次昨日/历史检查补充
    同步期间显示全屏覆盖层, 同步完成自动进入主页面; 失败可"重试"或"直接进入" */
@@ -1782,6 +2283,7 @@ function ensureEcharts(){
       Object.keys(CFG.funds).forEach(function(k){
         initNavChart(k, true);
         loadNavData(k);
+        drawMinute(k);
       });
     };
     document.head.appendChild(s);
@@ -1990,6 +2492,7 @@ function build(){
     restoreFold(k);
     initNavChart(k);
     loadNavData(k);  /* 无条件触发数据拉取(与echarts初始化解耦, 保证Network必有navs请求) */
+    drawMinute(k);   /* 锚定场内分时(有锚的场外基金才渲染, 内部自行判断) */
   });
   /* 金额总览: 折叠/排序/明细行定位 事件绑定 */
   bindSummary();
@@ -2013,6 +2516,8 @@ function build(){
       if(ch && typeof ch.resize === "function"){ try{ ch.resize(); }catch(e){} }
       var ch2 = window["chart_" + k];
       if(ch2 && typeof ch2.resize === "function"){ try{ ch2.resize(); }catch(e){} }
+      var ch3 = window["minchart_" + k];
+      if(ch3 && typeof ch3.resize === "function"){ try{ ch3.resize(); }catch(e){} }
     });
   }, 50);
 }
@@ -2158,8 +2663,30 @@ function persistRefresh(autoRefresh, sec){
     }).catch(function(){});
   } catch(e) {}
 }
+/* 切回前台立即补拉一次: 后台标签页会被浏览器节流/冻结定时器, 分时可能落后数分钟; 回到前台先刷新再等下一个周期 */
+document.addEventListener("visibilitychange", function(){
+  if(!document.hidden && pollTimer) poll();
+});
 var btnMgr = document.getElementById("btn-mgr");
 if(btnMgr) btnMgr.addEventListener("click", mgrToggle);
+/* 分时配置入口(卡片⚙ / ⚙分时): 事件委托, 卡片重建后无需重绑 */
+document.addEventListener("click", function(ev){
+  var t = ev.target && ev.target.closest ? ev.target.closest(".mt-cfg, .mt-add") : null;
+  if(!t) return;
+  var key = t.getAttribute("data-code");
+  if(key) openMinuteCfg(key);
+});
+/* 持仓模块"展开全部/收起": 切滚动限制类(默认约5行高度可滚动; 展开铺开显示), 事件委托 */
+document.addEventListener("click", function(ev){
+  var t = ev.target && ev.target.closest ? ev.target.closest(".btn-x5") : null;
+  if(!t) return;
+  var el = document.getElementById(t.getAttribute("data-tgl"));
+  if(!el) return;
+  var n = t.getAttribute("data-count") || "";
+  var cls = t.getAttribute("data-cls") || "list5";
+  var limited = el.classList.toggle(cls);
+  t.textContent = limited ? "展开全部(" + n + ")" : "收起";
+});
 /* 右侧浮动按钮: 回到顶部 / 打开持仓管理 */
 var fabTop = document.getElementById("fab-top");
 if(fabTop) fabTop.addEventListener("click", function(){ window.scrollTo({ top: 0, behavior: "smooth" }); });
@@ -2189,6 +2716,11 @@ if(trEx) trEx.addEventListener("click", function(){
     });
     list.querySelectorAll(".tr-gfold").forEach(function(b){ b.textContent = "收起基金"; });
     list.querySelectorAll(".tr-fold").forEach(function(b){ b.textContent = "收起记录"; });
+    /* 全部展开后表格可见, 统一补测量限高 */
+    list.querySelectorAll(".tr-group").forEach(function(g){
+      if(g.style.display === "none") return;
+      g.querySelectorAll(".tr-scroll.capped").forEach(trCapFit);
+    });
   }
 });
 var trCol = document.getElementById("tr-collapse-all");
@@ -2209,11 +2741,27 @@ if(trColF) trColF.addEventListener("click", function(){
     list.querySelectorAll(".tr-gfold").forEach(function(b){ b.textContent = "展开基金"; });
   }
 });
+/* ② 交易记录: "全部 / 持仓" 过滤(持仓=只显示剩余份额>0的基金, 其余整组隐藏) */
+(function(){
+  var seg = document.getElementById("tr-hold-seg");
+  if(!seg) return;
+  var btns = seg.querySelectorAll("button");
+  btns.forEach(function(b){
+    if(b._b) return; b._b = true;
+    b.addEventListener("click", function(){
+      TR_HOLD_ONLY = b.getAttribute("data-v") === "hold";
+      btns.forEach(function(x){ x.className = (x === b) ? "on" : ""; });
+      applyTrHoldFilter();
+    });
+  });
+})();
 var tpClose = document.getElementById("tp-close");
 if(tpClose) tpClose.addEventListener("click", hideTradePop);
 var tpPop = document.getElementById("trade-pop");
 if(tpPop) tpPop.addEventListener("click", function(e){ if(e.target === tpPop) hideTradePop(); });
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", build); else build();
+/* 宏观 CPI/PPI: 打开首页即后台静默触发一次检查(服务端每日节流, 当天已拉过则直接返回不联网) */
+try { fetch("/api/macro/auto", { method: "POST" }).catch(function(){}); } catch(e) {}
 """
 
 JS = JS.replace("__CFG__", json.dumps(CFG, ensure_ascii=False))
@@ -2262,6 +2810,17 @@ __ECHARTS_INLINE__
   .tr-group { margin:8px 0 6px 14px; padding:8px 10px 10px; border-left:2px solid #e0e7f5; background:#f8fafc; border-radius:0 8px 8px 0; }
   .tr-group-head { font-size:13px; margin-bottom:6px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .tr-records { margin-top:6px; }
+  /* ② 交易记录: "全部 / 持仓" 分段过滤 */
+  .tr-seg { display:inline-flex; align-items:stretch; vertical-align:middle; border:1px solid #c7d2fe; border-radius:6px; overflow:hidden; margin-left:2px; }
+  .tr-seg button { border:none; background:#fff; color:#4338ca; font-size:12.5px; padding:4px 12px; cursor:pointer; line-height:1.4; }
+  .tr-seg button:hover { background:#eef2ff; }
+  .tr-seg button.on { background:#4338ca; color:#fff; font-weight:600; }
+  .tr-seg button + button { border-left:1px solid #c7d2fe; }
+  /* 记录表: 多笔记录默认限高(露出最新5条, 其余滚动查看) + 全部展示按钮 */
+  .tr-capbar { display:flex; justify-content:flex-end; margin:2px 0 4px; }
+  .tr-scroll { overflow-y:auto; }
+  .tr-scroll.capped { border:1px solid #e5e7eb; border-radius:6px; }
+  .tr-scroll.capped thead th { position:sticky; top:0; background:#f8fafc; z-index:1; box-shadow:0 1px 0 #e5e7eb; }
   .tr-group-head b { font-weight:700; color:#111827; }
   .tr-add-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:6px; }
   .tr-add-row .mg-in { width:auto; padding:4px 7px; font-size:12px; }
@@ -2329,6 +2888,16 @@ __ECHARTS_INLINE__
   .btn-fold { border:1px solid #d1d5db; background:#f8fafc; border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; color:#374151; }
   .btn-fold:hover { background:#eef2ff; }
   .navsec { margin-top:10px; }
+  .mtsec { margin-top:10px; }
+  .mt-title { display:flex; align-items:center; gap:8px; font-size:12px; font-weight:600; color:#374151; }
+  .mt-sym { color:#6b7280; font-weight:400; }
+  .mt-meta { margin-left:auto; color:#9ca3af; font-weight:400; font-size:11px; }
+  .mt-cfg { cursor:pointer; color:#9ca3af; font-size:13px; padding:0 2px; }
+  .mt-cfg:hover { color:#4338ca; }
+  .mt-add { color:#9ca3af; font-size:10.5px; margin-left:10px; cursor:pointer; text-decoration:underline dotted; font-weight:400; }
+  .mt-add:hover { color:#4338ca; }
+  .minchart { height:216px; margin-top:6px; }
+  .mt-fallback { height:180px; display:flex; align-items:center; justify-content:center; color:#9ca3af; font-size:12px; background:#fafafa; border:1px dashed #e5e7eb; border-radius:6px; }
   .nav-tabs { display:flex; gap:6px; margin-bottom:6px; }
   .nt { border:1px solid #d1d5db; background:#fff; border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; color:#374151; }
   .nt:hover { background:#f3f4f6; }
@@ -2365,6 +2934,12 @@ __ECHARTS_INLINE__
   .d-real { background:#e6fcf5; color:#0ca678; border-radius:5px; padding:1px 6px; font-size:10.5px; font-weight:600; }
   .d-est { background:#fff9db; color:#b08900; border-radius:5px; padding:1px 6px; font-size:10.5px; font-weight:600; }
   .direct-note { margin-top:8px; color:#9ca3af; font-size:11px; line-height:1.5; }
+  /* 持仓模块默认约5行高度可滚动查看; "展开全部"解除高度限制铺开显示, "收起"恢复滚动 */
+  .x5scroll { max-height: 192px; overflow-y: auto; }
+  .x5scroll thead th { position: sticky; top: 0; background: #fff; z-index: 2; }
+  ul.direct-list.list5 { max-height: 130px; overflow-y: auto; }
+  .btn-x5 { margin-top:6px; padding:2px 12px; font-size:12px; border:1px solid #d1d5db; background:#f8fafc; border-radius:6px; cursor:pointer; color:#374151; }
+  .btn-x5:hover { background:#eef2ff; border-color:#c7d2fe; color:#4338ca; }
   .pos { margin-top:10px; background:#fafbfe; border:1px solid #e8ecf3; border-radius:10px; padding:10px 12px; }
   .pos-title { font-size:12px; font-weight:700; color:#374151; margin-bottom:8px; }
   .pos-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px 12px; }
@@ -2425,6 +3000,8 @@ __ECHARTS_INLINE__
     <button class="btn" id="btn-collapse-all">全部收起</button>
     <button class="btn btn-mgr" id="btn-mgr">持仓管理</button>
     <a class="btn btn-mgr" href="/sector" style="text-decoration:none">板块行情</a>
+    <a class="btn btn-mgr" href="/pigcycle" style="text-decoration:none">猪周期</a>
+    <a class="btn btn-mgr" href="/macro" style="text-decoration:none">宏观 CPI/PPI</a>
   </div>
   <div id="empty-hint" class="conn-hint" style="display:none">
     当前数据库为空，暂无基金数据。点击右上角 <strong>持仓管理 → 数据备份 / 初始化 → 导入数据</strong>，选择之前导出的 JSON 文件完成初始化；或在「持仓管理」面板添加基金。导入 / 添加后页面会自动重建。
@@ -2437,6 +3014,7 @@ __ECHARTS_INLINE__
       <input class="mg-in" id="mg-code" placeholder="基金编码(6位, 如022982)" style="width:200px">
       <input class="mg-in" id="mg-name" placeholder="名称(可选)">
       <input class="mg-in" id="mg-anchor" placeholder="底层ETF(联接基金选填, 如516670)" style="width:230px">
+      <input class="mg-in" id="mg-minute" placeholder="场内分时锚(选填, 如sh512170)" style="width:215px">
     </div>
     <div class="corr-title">持仓管理 — 两个区域分开: ① 基金管理(分类/删除) ② 交易记录(买卖, 按基金缩进; 持仓金额/收益全部按买卖记录自动计算)</div>
     <div class="mgr-sec-title">① 基金管理 — 设置分类(标签) / 保存 / 删除(伪删除, 数据保留可恢复) / 拖拽 ⠿ 调整排序(关注优先, 本地保存)
@@ -2448,7 +3026,10 @@ __ECHARTS_INLINE__
     <div class="mgr-sec-title">② 交易记录 — 每只基金下展示买入/卖出, 可添加/删除 (趋势图标点, 点击标点看详情)
       <button class="btn" id="tr-expand-all">全部展开</button>
       <button class="btn" id="tr-collapse-all">全部收起</button>
-      <button class="btn btn-gfold" id="tr-collapse-funds" title="收起全部基金(折叠每只基金, 仅留标题)">收起全部基金</button></div>
+      <button class="btn btn-gfold" id="tr-collapse-funds" title="收起全部基金(折叠每只基金, 仅留标题)">收起全部基金</button>
+      <span class="tr-seg" id="tr-hold-seg" title="过滤: 持仓=仅显示当前有剩余份额的基金, 其余基金整组隐藏">
+        <button type="button" data-v="all" class="on">全部</button><button type="button" data-v="hold">持仓</button>
+      </span></div>
     <div id="tr-list"></div>
     <div id="mgr-msg" class="src" style="margin-top:8px"></div>
     <div class="mgr-sec-title">数据备份 / 初始化（导出为文件，或导入文件初始化空库）

@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FIFO 滚动做T检验 · 014414 底部波动期可行性</title>
+<style>
+:root{--ink:#1f2937;--sub:#6b7280;--line:#e5e7eb;--bg:#f9fafb;--red:#dc2626;--green:#059669;--blue:#2563eb;--amber:#d97706;--panel:#f3f4f6}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:#fff;line-height:1.75;font-size:15.5px}
+.wrap{max-width:960px;margin:0 auto;padding:40px 32px 64px}
+h1{font-size:27px;line-height:1.35;margin-bottom:6px}
+.sub{color:var(--sub);font-size:14px;margin-bottom:28px}
+h2{font-size:20.5px;margin:44px 0 14px;padding-top:18px;border-top:2px solid var(--line)}
+h3{font-size:16.5px;margin:22px 0 10px}
+p{margin:10px 0}
+table{border-collapse:collapse;width:100%;margin:14px 0 20px;font-size:14px}
+th{background:var(--panel);text-align:left;padding:8px 10px;border:1px solid var(--line);font-weight:600;white-space:nowrap}
+td{padding:8px 10px;border:1px solid var(--line)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.pos{color:var(--red);font-weight:700}
+.neg{color:var(--green);font-weight:700}
+.hl{background:#fef9c3;padding:1px 5px;border-radius:3px;font-weight:700}
+.box{background:var(--bg);border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:6px;padding:14px 18px;margin:16px 0}
+.box.warn{border-left-color:var(--amber);background:#fffbeb}
+.box.good{border-left-color:var(--green)}
+figure{margin:20px 0;border:1px solid var(--line);border-radius:8px;padding:10px;background:#fff}
+figure img{width:100%;display:block;border-radius:4px}
+figcaption{font-size:12.5px;color:var(--sub);padding:8px 6px 2px}
+.small{font-size:13px;color:var(--sub)}
+code{background:var(--panel);padding:1px 6px;border-radius:4px;font-size:13px}
+.toc{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:16px 22px;margin:18px 0 8px;font-size:14px}
+.toc a{color:var(--blue);text-decoration:none}
+details{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px 16px;margin:12px 0}
+summary{cursor:pointer;font-weight:600;font-size:14.5px}
+ul,ol{margin:8px 0 8px 22px}
+li{margin:4px 0}
+.kv{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+.kv div{flex:1;min-width:190px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.kv b{display:block;font-size:12px;color:var(--sub);font-weight:600;margin-bottom:3px}
+.kv span{font-size:19px;font-weight:800}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>FIFO 滚动做T检验<br>——「5万/笔 · 1%触发 · 7日赎回」在底部波动期可行吗？</h1>
+<div class="sub">014414 净值序列 2022-04-19 ~ 2026-09-03（1065 个交易日） · 底部区 37.8% 的时间 · 回测脚本 t_fifo_swing.py / t_fifo_bias.py 可复现 · 2026-09-04</div>
+
+<div class="toc">
+<b>目录</b> &nbsp;
+<a href="#s1">一、你的 FIFO 洞察：验证成立，值 3.45 万</a> ·
+<a href="#s2">二、"每个波动都赚1%"做得到吗</a> ·
+<a href="#s3">三、盈利锁定版的会计幻觉</a> ·
+<a href="#s4">四、段末偏差自我修正</a> ·
+<a href="#s5">五、当前底部段实盘回放</a> ·
+<a href="#s6">六、结论与操作守则</a> ·
+<a href="#s7">七、局限与未解决问题</a> ·
+<a href="#s8">八、稳健性补充与操作卡</a>
+</div>
+
+<h2 id="s1">一、你的 FIFO 洞察：验证成立，值 3.45 万元</h2>
+
+<p>先把机制说清楚。<b>基金份额赎回遵循 FIFO（先进先出）</b>：你卖出时，基金公司按"最早买入的份额先出"结算持有天数。你有 27 万底仓（持有远超 7 天），每次卖 5 万：</p>
+
+<div class="kv">
+<div><b>底仓可覆盖卖出笔数</b><span>5.4 笔</span></div>
+<div><b>前 5 笔卖出的赎回费</b><span>0 元</span></div>
+<div><b>击穿条件</b><span>一周卖 6+ 次</span></div>
+<div><b>一次惩罚成本</b><span>750 元</span></div>
+</div>
+
+<p>FIFO 队头始终指向"最老的份额"。只要卖出频率不快于 <b>平均 1.3 天/笔</b>（27万÷5万=5.4 笔老份额垫底），队头永远是你早已持有的老份额——赎回费 0。你这套规则的<b>数学前提完全成立</b>：</p>
+
+<table>
+<tr><th>一周内卖出次数</th><th class="num">队头份额年龄</th><th>结果</th></tr>
+<tr><td>2 ~ 5 笔</td><td class="num">仍是老份额</td><td class="pos">安全（费 0）</td></tr>
+<tr><td>6 笔</td><td class="num">≈0.7 天</td><td class="neg">惩罚 1.5%</td></tr>
+<tr><td>8 笔</td><td class="num">≈2.3 天</td><td class="neg">惩罚 1.5%</td></tr>
+</table>
+
+<p>在 5 个历史底部段共 <b>47 笔卖出</b>中，这套机制实际只被罚了 1 笔（750 元）。如果<b>没有</b>这个底仓垫底（比如仓位小、或每次卖出规模小），47 笔全部要按 1.5% 计罚：</p>
+
+<div class="box good">
+<b>FIFO 洞察的货币价值</b>：35,250 − 750 = <b>省下 34,500 元</b>（平均每笔卖出省 734 元，占一笔 5 万的 1.47%）。1.5% 的短期赎回费曾让一切做T策略先亏 1.5% 才起步——你的底仓+FIFO 把这笔钱结构性归零了。<b>这是过去三轮做T分析里最有价值的一个洞察。</b>
+</div>
+
+<p class="small">唯一要防的边界：急涨行情里 1% 触发会连续报卖，一周 6 笔以上就击穿垫底。到那时宁可手动暂停卖出（见第六节守则）。</p>
+
+<h2 id="s2">二、"确保每个波动都赚1%"——做不到，先看证据</h2>
+
+<p>你方案的另一半假设是"买入卖出都按当前波动，确保每个当前波动是赚的"。这里有一个场外基金绕不过去的<b>物理约束</b>：15:00 前下单按当日收盘净值成交，而你下单时不知道收盘净值。所有"今天涨了所以我今天按今天的净值卖掉"的推理都是偷看答案。真实可得的是<b>昨涨 1% → 今按今收净值卖出</b>。</p>
+
+<p>把历史上所有卖→买回配对（机械 1%触发，5 个底部段，29 笔已平仓）：</p>
+
+<table>
+<tr><th>指标</th><th class="num">数值</th><th>含义</th></tr>
+<tr><td>配对成功（卖后买回）</td><td class="num">29 笔</td><td>另有 17 笔卖出直到段末都没等到买回</td></tr>
+<tr><td>平仓胜率</td><td class="num">41.4%</td><td>不到一半的"波动"真的赚了</td></tr>
+<tr><td>毛收益 ≥ +1%</td><td class="num">31.0%</td><td>你假设 100%，实际不到 1/3</td></tr>
+<tr><td>单笔毛收益中位</td><td class="num neg">−0.376%</td><td>典型的一笔是亏的</td></tr>
+<tr><td>最好 / 最差</td><td class="num">+5.51% / −5.15%</td><td>分布宽，方向不可控</td></tr>
+</table>
+
+<p>原因很朴素：<b>卖出后的反弹和下跌，与卖出时的那 1% 无关</b>。昨涨 1% 卖出后，明天可以接着涨（你卖飞），也可以回落超过 1%（你赚）。净值序列的日自相关接近 0（前几轮已验证），所以"确保每笔都赚"在信息上不存在。</p>
+
+<h2 id="s3">三、盈利锁定版："必须赚1%才买回"的会计幻觉</h2>
+
+<p>那把你的规则写得更死一点——<b>卖出后只在净值跌回卖出价的 99% 以下才买回</b>。这样每一笔<b>平仓</b>的波动按定义都 ≥ +1%。回测结果（343 个无偏 60 日窗口的平均）：</p>
+
+<table>
+<tr><th>规则</th><th class="num">已实现价差/窗口</th><th class="num">总资产 vs 躺平/窗口</th><th class="num">卖飞比例</th></tr>
+<tr><td>机械 1%/1%（对照）</td><td class="num neg">−2,742</td><td class="num neg">−2,742</td><td class="num">—</td></tr>
+<tr><td>锁定1% · 卖触发1.0%</td><td class="num pos">+4,450</td><td class="num neg">−2,104</td><td class="num">55%</td></tr>
+<tr><td>锁定1% · 卖触发1.5%</td><td class="num pos">+2,954</td><td class="num neg">−1,479</td><td class="num">58%</td></tr>
+<tr><td>锁定2% · 卖触发1.0%</td><td class="num pos">+4,848</td><td class="num neg">−2,086</td><td class="num">60%</td></tr>
+<tr><td>锁定2% · 卖触发1.5%</td><td class="num pos">+3,824</td><td class="num neg">−483</td><td class="num">59%</td></tr>
+</table>
+
+<figure><img src="images/t_fifo_illusion.svg" alt="会计幻觉"><figcaption>已实现全为正、总资产全为负——差额是被卖飞的机会成本。规则保证了每笔平仓都赚钱，但保证不了财富增加。</figcaption></figure>
+
+<p><b>左列全正、右列全负</b>，这就是你这套方案的本质：它是一台"已实现利润生成器"，代价是把等量的钱搬进机会成本。55%~60% 的卖出在窗口内永远等不到 −1% 的回落；等到的那部分，中位要等 8 天，一成要等 40 天以上。账面永远在赢，钱却在流失。</p>
+
+<h2 id="s4">四、段末偏差：我自己上一版结论被推翻</h2>
+
+<p>诚实记录一个方法论错误。上一版脚本用"净值 ≤0.85"划底部段，<b>涨破 0.85 就结束</b>——每段末尾天然是上涨，系统性惩罚先卖后买。修正方法：把每段末尾几天砍掉重测：</p>
+
+<figure><img src="images/t_fifo_bias.svg" alt="段末偏差"><figcaption>砍掉末 10 天后总资产从 −36,857 变 +2,505。原始整段的数字是偏差产物。</figcaption></figure>
+
+<p>最终的无偏检验：343 个"起点在底部区、固定 60 交易日"的滚动窗口（不预知窗口怎么结束）：</p>
+
+<table>
+<tr><th>触发（卖/买）</th><th class="num">均值/窗口</th><th class="num">中位</th><th class="num">胜率</th><th class="num">最好</th><th class="num">最差</th></tr>
+<tr><td>0.5 / 0.5</td><td class="num neg">−6,013</td><td class="num neg">−7,275</td><td class="num">26%</td><td class="num pos">+20,760</td><td class="num neg">−31,376</td></tr>
+<tr><td><b>1.0 / 1.0（你的参数）</b></td><td class="num neg">−2,742</td><td class="num neg">−2,453</td><td class="num">37%</td><td class="num pos">+14,819</td><td class="num neg">−30,542</td></tr>
+<tr><td>1.5 / 1.5</td><td class="num neg">−1,442</td><td class="num neg">−608</td><td class="num">46%</td><td class="num pos">+13,321</td><td class="num neg">−27,740</td></tr>
+<tr><td>1.5 / 2.5</td><td class="num neg">−1,351</td><td class="num neg">−2,749</td><td class="num">35%</td><td class="num pos">+51,757</td><td class="num neg">−32,306</td></tr>
+<tr><td>2.0 / 2.0</td><td class="num neg">−1,711</td><td class="num neg">−1,222</td><td class="num">32%</td><td class="num pos">+11,007</td><td class="num neg">−24,896</td></tr>
+</table>
+
+<p>结论修正为：<b>机械倒T在底部区是轻微负期望（均值 −1,351 ~ −6,013，远好于段末检验的 −36,857），但依然不为正</b>。你的 (1.0, 1.0) 不是最差也不是最好——参数差异（约 4,700 元/窗口）远小于最差月份的回撤（−3 万），不值得调。</p>
+
+<h2 id="s5">五、当前底部段实盘回放（2026-05-12 ~ 09-03）</h2>
+
+<p>这一段净值 0.8391 → 0.7726（−7.93%）。三个口径对比：</p>
+
+<table>
+<tr><th>策略</th><th class="num">已实现</th><th class="num">总资产</th><th class="num">卖/买/未平</th></tr>
+<tr><td>躺平不动</td><td class="num">—</td><td class="num neg">−21,398</td><td class="num">—</td></tr>
+<tr><td>机械 1%/1% · ETF 516670</td><td class="num neg">−460</td><td class="num pos">+495</td><td class="num">16 / 13 / 7</td></tr>
+<tr><td>机械 1%/1% · 014414 A类</td><td class="num neg">−2,347</td><td class="num neg">−2,122</td><td class="num">15 / 12 / 7</td></tr>
+<tr><td>锁定1% · ETF</td><td class="num pos">+2,223</td><td class="num neg">−9,019</td><td class="num">7 / 3 / 4</td></tr>
+<tr><td>锁定2% · ETF</td><td class="num pos">+4,065</td><td class="num neg">−7,043</td><td class="num">7 / 3 / 4</td></tr>
+</table>
+
+<figure><img src="images/t_fifo_current.svg" alt="当前段回放"><figcaption>红圈标记的 4 笔卖出发生在 0.6969~0.7796（其中一笔几乎就在本轮最低点 0.6829 上方），此后净值一路走高再没回落 1%——20 万仓位踏空了整段反弹。</figcaption></figure>
+
+<p>注意两个反直觉的点：</p>
+<ul>
+<li><b>机械版总资产 +495，是唯一为正的策略</b>——因为这一段整体在跌，"先卖后买"天然占优；但它赚的不是择时，是下跌段的 beta。</li>
+<li><b>盈利锁定版已实现 +2,223~+4,065，总资产却比躺平还差 7,000~9,000</b>：6/30 在 0.6969（本轮最低点附近）卖出后，规则要求"跌回 1% 才买"，而市场直接涨走了。你的规则在最该满仓的位置清了仓。</li>
+</ul>
+
+<h2 id="s6">六、结论与操作守则</h2>
+
+<div class="box">
+<b>直接回答你的问题：可行，但定位要摆正。</b>
+<ol>
+<li><b>FIFO 机制：真，且值钱。</b>27 万底仓 + 5 万/笔滚动，结构性免掉 1.5% 短期赎回费（历史回测省 34,500 元 / 47 笔）。这是你方案里唯一"稳赚"的部分——但它省的是成本，不创造利润。</li>
+<li><b>"确保每个波动赚 1%"：做不到。</b>场外按收盘价成交 + 日自相关为零，决定了每笔波段是独立的 ~50/50。就算用"必须赚才买回"把它做成会计上必赢，55% 以上的卖飞会在机会成本里把钱亏回去（历史均值 −483 ~ −2,354 元/窗口）。</li>
+<li><b>底部波动期的真实期望：</b>轻微负（最好的参数 −483 元/窗口 ≈ 噪声级），换来的是比躺平低得多的波动和"手里始终有钱"的心理优势。它不是盈利策略，是<b>损失最小的躺平替代</b>。</li>
+<li><b>真想让做T产生利润，等价条件只有一个：</b>你能在低位把卖飞的部分接回来。历史上那 17 笔没接回来的卖出，全部出现在底部段的反弹起点。这不是费率问题、不是参数问题，是<b>方向判断问题</b>——回到猪周期：当前能繁 3904 万头仍在去化、二育 9 月中出栏压制猪价，短期震荡概率大，<b>现在到 9 月中是这套规则历史上最舒服的环境</b>；9 月中之后猪价若启动，请停手。</li>
+</ol>
+</div>
+
+<h3>操作守则（如果做）</h3>
+<ul>
+<li><b>工具用场内 516670</b>：T+0 资金可用（回测中 T+2 在途让买回成功率再降一档）、双边佣金 0.02%、无 7 天约束。014414 A 类次之（0.12% 申购费）；<b>做T超过 18 次/年时 C 类 014415 更省</b>（销售服务费 0.4%/年 vs A 类 0.12%×次数）。</li>
+<li><b>每笔 5 万、涨 1% 触发卖出、只在跌回 1% 以上时买回</b>——参数固定，永不调参（walk-forward 已证明调参反而更差）。</li>
+<li><b>垫底保护开关</b>：本周内已卖 4 笔就暂停卖出（防止第 6 笔击穿 FIFO 垫底，罚 750/笔）。</li>
+<li><b>停手开关</b>：净值突破 0.85（出底部区）或猪价单月涨幅超 15%（周期启动）→ 立即停T满仓。你所有的历史亏损窗口都发生在启动段。</li>
+<li>期望管理：这套规则的历史全貌是"多数月份小赢（胜率 56~67%）+ 偶发一次 −1.5 万级卖飞"，<b>全年别指望它贡献正收益</b>，把它当作持仓成本管理工具。</li>
+</ul>
+
+<h2 id="s7">七、局限与未解决问题</h2>
+<details><summary>回测口径的六项已知局限</summary>
+<ul>
+<li><b>净值无盘中信息</b>：真实 516670 场内可看盘口挂单，成交可以比收盘价更好；回测用收盘净值，可能低估场内策略。但同理，1% 触发在盘中会假触发，净值数据看不到。</li>
+<li><b>赎回在途按 T+2</b>：实际 014414 赎回到账 T+2~T+4，视渠道而定；T+4 情景已测（结果差异 <1,500 元，非主要矛盾）。</li>
+<li><b>分红未建模</b>：014414 历史无分红，014415 C 类销售服务费按 0.4%/年线性计提，未考虑净值口径差异（C 类净值不含销售服务费，此处直接对 A 类净值扣费，误差 ~0.1%/月量级）。</li>
+<li><b>底部区定义已做敏感性检验</b>：0.80/0.82/0.85/0.88 及历史分位口径全部为负（见 8.1 节），结论不依赖这条线；其中 0.88 的结果最好（−2,069/窗），深底部区更差。</li>
+<li><b>锁定规则按日频检查</b>：场内做T可以日内完成，收益上限比日频回测高，但那需要盯盘且依赖盘中波动，净值数据无法评估。</li>
+<li><b>锁定规则的等待期无利率</b>：踏空期间现金按 0 收益计，若买货币基金（~1.4%/年）每窗口可补回约 200 元，不改变结论。</li>
+</ul>
+</details>
+
+<h2 id="s8">八、稳健性补充与操作卡</h2>
+
+<h3>8.1 底部区定义敏感性：结论与 0.85 这条线无关</h3>
+
+<p>用不同阈值重划底部区（含历史分位口径），60 日无偏窗口重跑：</p>
+
+<table>
+<tr><th>阈值</th><th class="num">窗口数</th><th class="num">机械1/1 均值</th><th class="num">机械胜率</th><th class="num">锁定1% 均值</th><th class="num">锁定胜率</th></tr>
+<tr><td>0.80 / p20(0.7979)</td><td class="num">159</td><td class="num neg">−6,178</td><td class="num">18%</td><td class="num neg">−8,286</td><td class="num">14%</td></tr>
+<tr><td>0.82 / p25(0.8154)</td><td class="num">229</td><td class="num neg">−5,498</td><td class="num">27%</td><td class="num neg">−7,222</td><td class="num">20%</td></tr>
+<tr><td><b>0.85 / p30(0.8272)</b></td><td class="num">343</td><td class="num neg">−3,703</td><td class="num">31%</td><td class="num neg">−4,262</td><td class="num">31%</td></tr>
+<tr><td>0.88</td><td class="num">443</td><td class="num neg">−2,069</td><td class="num">47%</td><td class="num neg">−1,545</td><td class="num">44%</td></tr>
+</table>
+
+<p><b>所有阈值下均值全为负</b>——结论不依赖 0.85 这条线。且有个规律：越深的底部区（0.80）期望越差（−6,178），越接近常规震荡（0.88）越接近打平。深熊里"先卖"踏空的代价更大。另一处口径修正：本节引擎把"底部区内才允许交易"建进去了（严格对应你的规则），比第四节不带此限制的 −2,742 更悲观——<b>你的规则的诚实数字是机械 −3,703 / 锁定 −4,262 每窗</b>，之前 −2,742 略有美化。</p>
+
+<h3>8.2 盈利锁定参数网格：没有一个格子能赚钱</h3>
+
+<p>锁定比例 × 卖出触发的 20 格网格（底部区 0.85，343 窗口）：<b>均值全为负</b>，最好的格子是 lock 2% / 卖 1.5%（均值 −483、中位 +1,516、胜率 52%）——就是报告主表已采用的那格。规律清晰：<b>卖出触发放宽到 1.5%（少卖、卖在更大波动上）一致优于 0.5%~2.0%</b>；锁定比例影响不大。均值 −483 仍是样本内挑选，当作上界而非期望。</p>
+
+<h3>8.3 操作卡（以 2026-09-03 收盘净值 0.7726 计）</h3>
+
+<table>
+<tr><th>动作</th><th>触发条件</th><th>具体价位</th></tr>
+<tr><td><b>卖出 5 万</b></td><td>昨日收盘较前日涨 ≥1%</td><td class="num">昨日净值 ≥ 0.7650</td></tr>
+<tr><td><b>买回 5 万</b></td><td>净值 ≤ 卖出价 × 0.99</td><td class="num">如卖在 0.7800 → 只在 ≤0.7722 买回</td></tr>
+<tr><td><b>停止卖出</b></td><td>滚动 7 天内已卖 4 笔</td><td class="num">护住 FIFO 垫底（6 笔击穿，罚 750/笔）</td></tr>
+<tr><td><b>全面停 T</b></td><td>净值 &gt; 0.85 或猪价月涨 15%</td><td class="num">直接满仓拿趋势</td></tr>
+</table>
+
+<div class="box warn">
+<b>现实警告：最近 12 天恰好演示了击穿场景。</b>2026-08-19 ~ 09-03 出现了 <b>6 次卖出信号</b>（8/19、8/21、8/26、8/28、8/31、9/2）——净值从 0.7579 连续反弹到 0.7908 的脉冲行情。如果你按信号全部执行：前 5 笔耗尽 FIFO 垫底（5.4 格），<b>第 6 笔（9/2）就会吃到 1.5% 惩罚费 750 元</b>；且锁定规则下这 6 笔一笔都没等到 −1% 买回（期间最低 0.7525，不够 0.99×卖价），共 30 万踏空了 8 月末的反弹。这正是"急涨行情 = 这套方案最差的Environment"的实盘样本。执行层面的解读：<b>8/31 和 9/2 的信号本不该卖</b>——7 天滚动计数早在 8/28 的第 4 笔时就该锁死了。
+</div>
+
+<p class="small" style="margin-top:28px">数据：SQLite data/fund_history.db（014414 净值 2022-04-19~2026-09-03）· 费率：招商基金官网/晨星四方核实（N&lt;7天 1.5%，N≥7天 0）· 脚本：t_fifo_swing.py、t_fifo_bias.py、t_fifo_sensitivity.py、make_fifo_charts.py · 本文为数据回测，不构成投资建议。</p>
+
+</div>
+</body>
+</html>

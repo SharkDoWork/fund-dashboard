@@ -13,15 +13,12 @@ data/_*.js
 data/_*.json
 data/nav_check_*.md
 
-# 生成产物
-dashboard.html
-market.html
-sector.html
-
+# 数据库与生成产物(可重建, 不入库)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/dca_result.json
 data/_dashboard_check.js
-data/fund_history.db
-
-*.html
 
 # WorkBuddy 项目本地数据(不入库)
 .workbuddy/

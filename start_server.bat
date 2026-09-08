@@ -47,8 +47,18 @@ echo [%date% %time%] choice=%CHOICE% >> "%LOG%"
 if "%CHOICE%"=="1" goto start_srv
 if "%CHOICE%"=="2" goto stop_srv
 if "%CHOICE%"=="3" goto open_dash
-if "%CHOICE%"=="0" exit /b
+if "%CHOICE%"=="0" goto bye
 goto menu
+
+:bye
+echo.
+echo   正在退出: 先关闭服务(若在运行)...
+call :do_stop
+echo.
+echo   再见, 本窗口即将关闭...
+echo [%date% %time%] bye exit >> "%LOG%"
+timeout /t 2 /nobreak >nul
+exit
 
 :start_srv
 echo [%date% %time%] start_srv >> "%LOG%"
@@ -82,18 +92,32 @@ pause
 goto menu
 
 :stop_srv
-echo [%date% %time%] stop_srv >> "%LOG%"
+echo [%date% %time%] stop_srv enter >> "%LOG%"
 echo   正在关闭服务(端口 8123)...
-powershell -NoProfile -Command "$ids=(Get-NetTCPConnection -LocalPort 8123 -State Listen -ErrorAction SilentlyContinue).OwningProcess; if($ids){$ids|ForEach-Object{Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; Write-Output ('killed PID '+$_)}; Start-Sleep -Seconds 1; $left=(Get-NetTCPConnection -LocalPort 8123 -State Listen -ErrorAction SilentlyContinue).OwningProcess; if($left){exit 1}else{exit 0}}else{Write-Output 'no listener'}"
-if errorlevel 1 (
-  echo   [警告] 端口仍被占用(多半是权限不足), 请以管理员身份运行本脚本重试。
-) else (
-  echo   服务已关闭。
-)
+call :do_stop
+echo [%date% %time%] stop_srv before_pause >> "%LOG%"
 pause
+echo [%date% %time%] stop_srv after_pause >> "%LOG%"
 goto menu
 
 :open_dash
 echo [%date% %time%] open_dash >> "%LOG%"
 start "" http://127.0.0.1:8123
 goto menu
+
+rem ---------- 共用: 关闭 8123 服务(纯 batch, 无 powershell) ----------
+:do_stop
+set KILLED=0
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8123" ^| findstr "LISTENING"') do (
+  echo   - 结束进程 PID %%p
+  taskkill /f /pid %%p >nul 2>&1
+  echo [%date% %time%] taskkill %%p ec=!errorlevel! >> "%LOG%"
+  set /a KILLED+=1
+)
+echo [%date% %time%] do_stop killed=!KILLED! >> "%LOG%"
+if "!KILLED!"=="0" (
+  echo   [提示] 未发现运行中的服务, 端口 8123 无监听。
+) else (
+  echo   服务已关闭。
+)
+goto :eof
