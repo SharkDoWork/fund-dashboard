@@ -14,6 +14,9 @@ data/_*.json
 data/nav_check_*.md
 
 # 数据库与生成产物(可重建, 不入库)
+*.html
+images/
+t_trade_result.json
 data/*.db
 data/*.db-wal
 data/*.db-shm
